@@ -575,13 +575,14 @@
     }
 
     // ---------- model classify ----------
-    const MODEL_CATEGORIES = ['Claude', 'GPT', 'Gemini', 'Grok', '其他'];
+    const MODEL_CATEGORIES = ['Claude-官号', 'Claude-Kiro', 'GPT', 'Gemini', 'Grok', '其他'];
     const DEFAULT_RULES = {
-        'Claude': ['claude', 'anthropic', 'sonnet', 'opus', 'haiku', 'max', '反重力', 'antigravity', 'kiro', 'aws', 'bedrock'],
+        'Claude-Kiro': ['kiro', 'krio'],
+        'Claude-官号': ['claude', 'anthropic', 'sonnet', 'opus', 'haiku', 'max', '反重力', 'antigravity', 'aws', 'bedrock'],
         'GPT': ['gpt', 'openai', 'o1', 'o3', 'o4', 'chatgpt', 'codex', 'team', '黑冲', '正价pro', '低价', 'plus'],
         'Gemini': ['gemini', 'google', 'bard', 'palm'],
         'Grok': ['grok', 'xai'],
-    };
+    }
 
     function loadClassifyRules() {
         try {
@@ -608,7 +609,7 @@
     }
 
     function getCategoryTag(cat) {
-        const cls = { 'Claude': 'tag-claude', 'GPT': 'tag-gpt', 'Gemini': 'tag-gemini', 'Grok': 'tag-grok', '其他': 'tag-other' };
+        const cls = { 'Claude-官号': 'tag-claude', 'Claude-Kiro': 'tag-kiro', 'GPT': 'tag-gpt', 'Gemini': 'tag-gemini', 'Grok': 'tag-grok', '其他': 'tag-other' };
         return `<span class="model-tag ${cls[cat] || 'tag-other'}">${esc(cat)}</span>`;
     }
 
@@ -772,7 +773,7 @@
                 if (!byCategory[cat]) return;
                 const sorted = byCategory[cat].slice().sort((a, b) => a.ratio - b.ratio);
                 sorted.forEach(g => {
-                    const tagCls = { 'Claude': 'tag-claude', 'GPT': 'tag-gpt', 'Gemini': 'tag-gemini', 'Grok': 'tag-grok', '其他': 'tag-other' }[cat] || 'tag-other';
+                    const tagCls = { 'Claude-官号': 'tag-claude', 'Claude-Kiro': 'tag-kiro', 'GPT': 'tag-gpt', 'Gemini': 'tag-gemini', 'Grok': 'tag-grok', '其他': 'tag-other' }[cat] || 'tag-other';
                     const rawTip = (g.raw_ratio != null && g.raw_ratio !== g.ratio)
                         ? `原始倍率 ${g.raw_ratio}x（1:${rr}）` : '';
                     groupsHtml += `<span class="group-pill" title="${esc(g.name)}${rawTip ? ' — ' + rawTip : ''}">

@@ -1107,6 +1107,12 @@ html[data-theme="dark"] .toast-err {
   color: #92400e;
 }
 
+.tag-kiro {
+  background: #fef9e7;
+  color: #a0700a;
+  border: 1px dashed #e5c76b;
+}
+
 .tag-gpt {
   background: #d1fae5;
   color: #065f46;
@@ -1130,6 +1136,12 @@ html[data-theme="dark"] .toast-err {
 html[data-theme="dark"] .tag-claude {
   background: rgba(251, 191, 36, 0.16);
   color: #fcd34d;
+}
+
+html[data-theme="dark"] .tag-kiro {
+  background: rgba(200, 160, 40, 0.12);
+  color: #e5c76b;
+  border-color: rgba(229, 199, 107, 0.3);
 }
 
 html[data-theme="dark"] .tag-gpt {

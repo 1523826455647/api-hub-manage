@@ -1237,6 +1237,7 @@ def _resolve_upstream_key(account: dict, group_name: str) -> str:
 _PLATFORM_KEYWORDS: list[tuple[str, str]] = [
     ("claude", "anthropic"), ("anthropic", "anthropic"),
     ("sonnet", "anthropic"), ("opus", "anthropic"), ("haiku", "anthropic"),
+    ("kiro", "anthropic"), ("krio", "anthropic"),
     ("gpt", "openai"), ("openai", "openai"), ("o1", "openai"),
     ("o3", "openai"), ("o4", "openai"), ("chatgpt", "openai"),
     ("codex", "openai"),
@@ -1256,8 +1257,10 @@ def _group_to_platform(group_name: str, account_platform: str) -> str:
 
 # 模型分类关键词（与前端 classifyGroup 保持一致）
 _CATEGORY_KEYWORDS: dict[str, list[str]] = {
-    "Claude": ["claude", "anthropic", "sonnet", "opus", "haiku", "antigravity", "反重力",
-               "kiro", "aws", "bedrock", "max"],
+    # Claude-Kiro must be checked BEFORE Claude-官号
+    "Claude-Kiro": ["kiro", "krio"],
+    "Claude-官号": ["claude", "anthropic", "sonnet", "opus", "haiku", "max",
+                   "antigravity", "反重力", "aws", "bedrock"],
     "GPT": ["gpt", "openai", "o1", "o3", "o4", "chatgpt", "codex", "黑冲", "plus", "team", "正价pro", "低价"],
     "Gemini": ["gemini", "google", "bard", "palm"],
     "Grok": ["grok", "xai"],
