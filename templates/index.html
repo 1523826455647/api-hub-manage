@@ -617,16 +617,18 @@
     let classifyRules = loadClassifyRules();
 
     function classifyGroup(name) {
-        const n = (name || '').toLowerCase();
-        for (const [cat, keywords] of Object.entries(classifyRules)) {
-            for (const kw of keywords) {
-                if (n.includes(String(kw).toLowerCase())) return cat;
+        try {
+            const n = (name || '').toLowerCase();
+            const rules = classifyRules || DEFAULT_RULES;
+            for (const [cat, keywords] of Object.entries(rules)) {
+                for (const kw of keywords) {
+                    if (n.includes(String(kw).toLowerCase())) return cat;
+                }
             }
-        }
+        } catch(e) { console.warn('classifyGroup error:', e); }
         return '其他';
     }
-
-    function getCategoryTag(cat) {
+function getCategoryTag(cat) {
         const cls = { 'Claude-官号': 'tag-claude', 'Claude-Kiro': 'tag-kiro', 'GPT': 'tag-gpt', 'Gemini': 'tag-gemini', 'Grok': 'tag-grok', '其他': 'tag-other' };
         return `<span class="model-tag ${cls[cat] || 'tag-other'}">${esc(cat)}</span>`;
     }
