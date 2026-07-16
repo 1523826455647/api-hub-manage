@@ -1153,7 +1153,7 @@
             if (!candidates.length) {
                 h += '<div class="empty"><div class="empty-icon">🎉</div><h3>没有发现超低价分组</h3></div>';
             } else {
-                h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr><th>渠道</th><th>平台</th><th>分组名</th><th>有效倍率</th><th>Key</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+                h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr><th>渠道</th><th>平台</th><th>分类</th><th>分组名</th><th>有效倍率</th><th>Key</th><th>状态</th><th>操作</th></tr></thead><tbody>';
                 const gkMap = window.__groupKeys || {};
                 candidates.forEach((c, i) => {
                     const rawNote = (c.raw_ratio != null && c.raw_ratio !== c.ratio)
@@ -1182,9 +1182,11 @@
                     } else {
                         opHtml = `<button class="btn btn-primary" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px">配置到此 Hub</button>`;
                     }
+                    const cat = classifyGroup(c.group_name);
                     h += `<tr>
                         <td class="channel-col">${esc(c.name)}</td>
                         <td><span class="ch-tag tag-${esc(c.platform)}">${esc(c.platform)}</span></td>
+                        <td>${getCategoryTag(cat)}</td>
                         <td style="font-weight:600">${esc(c.group_name)}</td>
                         <td class="best">${c.ratio}x <span style="font-size:10px;color:var(--text-muted)">${rawNote}</span></td>
                         <td>${keyHtml}</td>
@@ -1365,15 +1367,16 @@
             }
             let h = `<div class="section-title" style="margin-top:8px">已配置映射 <span style="color:var(--text-muted);font-weight:600;font-size:12px">${mappings.length} 条</span></div>
             <div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr>
-                <th>上游渠道</th><th>上游分组</th><th>有效倍率</th><th>Hub 分组 ID</th><th>Hub 账号</th><th>上次同步</th><th>操作</th>
+                <th>上游渠道</th><th>上游分组</th><th>分类</th><th>有效倍率</th><th>Hub 分组</th><th>上次同步</th><th>操作</th>
             </tr></thead><tbody>`;
             mappings.forEach(m => {
+                const cat = classifyGroup(m.upstream_group_name);
                 h += `<tr>
                     <td class="channel-col" title="${esc(m.upstream_base_url)}">${esc(m.upstream_account_name)}</td>
                     <td style="font-weight:600">${esc(m.upstream_group_name)}</td>
+                    <td>${getCategoryTag(cat)}</td>
                     <td style="font-variant-numeric:tabular-nums">${m.last_ratio != null ? esc(m.last_ratio)+'x' : '—'}</td>
-                    <td>${esc(m.hub_group_id)}</td>
-                    <td style="font-size:11px">${esc(m.hub_account_name)}</td>
+                    <td style="font-size:11px">${esc(m.hub_group_name || m.hub_group_id)}</td>
                     <td style="font-size:11px;color:var(--text-muted)">${esc(m.last_sync)}</td>
                     <td>
                         <button class="btn btn-ghost" type="button" data-act="sync-ratio" data-mid="${esc(m.id)}" style="font-size:10px;padding:3px 8px">同步倍率</button>

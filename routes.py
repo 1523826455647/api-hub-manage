@@ -873,12 +873,14 @@ async def provision_account(req: dict):
     admin = Sub2APIAdmin(hub_url)
     try:
         await admin.login(hub_email, hub_password)
+        hub_gn = _hub_group_name(group_name)
+        cat = _classify_group_category(group_name)
         result = await admin.provision_upstream(
             account_name=f"{account['name']}-{group_name}",
             base_url=account["base_url"],
             api_key=upstream_key,
             platform=platform,
-            group_name="超低价自动化",
+            group_name=hub_gn,
             group_rate=float(ratio),
         )
         # 记录映射
@@ -887,6 +889,7 @@ async def provision_account(req: dict):
             "upstream_account_id": account_id,
             "upstream_account_name": account["name"],
             "upstream_group_name": group_name,
+            "category": cat,
             "upstream_base_url": account["base_url"],
             "platform": platform,
             "hub_group_id": result["group"]["id"],
@@ -1051,12 +1054,14 @@ async def auto_sync():
                 if need_hub:
                     try:
                         platform = _group_to_platform(group_name, acc.get("platform", "newapi"))
+                        hub_gn = _hub_group_name(group_name)
+                        cat = _classify_group_category(group_name)
                         result = await admin.provision_upstream(
                             account_name=f"{acc['name']}-{group_name}",
                             base_url=acc["base_url"],
                             api_key=upstream_key,
                             platform=platform,
-                            group_name="超低价自动化",
+                            group_name=hub_gn,
                             group_rate=float(ratio),
                         )
                         mapping = {
@@ -1064,6 +1069,7 @@ async def auto_sync():
                             "upstream_account_id": acc["id"],
                             "upstream_account_name": acc["name"],
                             "upstream_group_name": group_name,
+                            "category": cat,
                             "upstream_base_url": acc["base_url"],
                             "platform": platform,
                             "hub_group_id": result["group"]["id"],
@@ -1209,6 +1215,31 @@ def _group_to_platform(group_name: str, account_platform: str) -> str:
         if kw in n:
             return plat
     return "anthropic" if account_platform == "newapi" else "openai"
+
+
+# 模型分类关键词（与前端 classifyGroup 保持一致）
+_CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "Claude": ["claude", "anthropic", "sonnet", "opus", "haiku", "antigravity", "反重力",
+               "kiro", "aws", "bedrock", "max"],
+    "GPT": ["gpt", "openai", "o1", "o3", "o4", "chatgpt", "codex", "黑冲", "plus", "team", "正价pro", "低价"],
+    "Gemini": ["gemini", "google", "bard", "palm"],
+    "Grok": ["grok", "xai"],
+}
+
+
+def _classify_group_category(group_name: str) -> str:
+    """将分组名归类到模型厂商"""
+    n = (group_name or "").lower()
+    for cat, keywords in _CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if kw in n:
+                return cat
+    return "其他"
+
+
+def _hub_group_name(group_name: str) -> str:
+    """生成 Hub 中的分组名，按模型类型区分"""
+    return f"超低价-{_classify_group_category(group_name)}"
 
 
 class UpstreamKeyUpdate(BaseModel):
