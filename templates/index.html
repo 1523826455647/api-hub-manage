@@ -1170,8 +1170,13 @@
                         } else {
                             statusHtml = `<span style="color:var(--success);font-size:11px">✓ 已配置</span>`;
                         }
+                    } else if (c.beats_existing) {
+                        statusHtml = `<span style="color:var(--primary);font-size:11px;font-weight:700">🏆 更低! (${c.existing_best_ratio}x→${c.ratio}x)</span>`;
                     } else {
                         statusHtml = `<span style="color:var(--text-muted);font-size:11px">未配置</span>`;
+                    }
+                    if (c.is_best_in_category && !c.mapped && !c.beats_existing) {
+                        statusHtml += ` <span style="color:var(--success);font-size:10px">最优</span>`;
                     }
                     let opHtml = '';
                     if (c.mapped) {

@@ -823,6 +823,30 @@ async def scan_low_price():
                 })
 
     candidates.sort(key=lambda x: x["ratio"])
+    # 计算每个 (account, category) 的最优倍率
+    best_in_category: dict[str, float] = {}
+    for c in candidates:
+        cat = _classify_group_category(c["group_name"])
+        key = f"{c['id']}/{cat}"
+        if key not in best_in_category or c["ratio"] < best_in_category[key]:
+            best_in_category[key] = c["ratio"]
+    # 标注：是否比已映射的同类别更低（升级机会）
+    for c in candidates:
+        cat = _classify_group_category(c["group_name"])
+        key = f"{c['id']}/{cat}"
+        c["is_best_in_category"] = (c["ratio"] == best_in_category[key])
+        if c["mapped"]:
+            c["beats_existing"] = False
+        else:
+            # 找同 account + category 的已映射最低倍率
+            mapped_best = 999.0
+            for m in mappings:
+                if (m["upstream_account_id"] == c["id"]
+                        and _classify_group_category(m["upstream_group_name"]) == cat):
+                    if m["last_ratio"] < mapped_best:
+                        mapped_best = m["last_ratio"]
+            c["beats_existing"] = c["ratio"] < mapped_best
+            c["existing_best_ratio"] = mapped_best if mapped_best < 999 else None
     return {"success": True, "data": {"threshold": threshold, "candidates": candidates}}
 
 
@@ -1050,12 +1074,25 @@ async def auto_sync():
                 else:
                     skip_count += 1
             else:
-                # 新发现，创建
+                # Check if better than existing mapped ratio in same category
+                cat = _classify_group_category(group_name)
+                mapped_best = 999.0
+                for m in _load_mappings():
+                    if (m["upstream_account_id"] == acc["id"]
+                            and _classify_group_category(m["upstream_group_name"]) == cat):
+                        if m["last_ratio"] < mapped_best:
+                            mapped_best = m["last_ratio"]
+                is_upgrade = ratio < mapped_best
+                if not is_upgrade and mapped_best < 999:
+                    log.append({"action": "skipped", "group": group_name,
+                                "reason": f"{ratio}x >= {mapped_best}x"})
+                    skip_count += 1
+                    continue
+                # New or better - create
                 if need_hub:
                     try:
                         platform = _group_to_platform(group_name, acc.get("platform", "newapi"))
                         hub_gn = _hub_group_name(group_name)
-                        cat = _classify_group_category(group_name)
                         result = await admin.provision_upstream(
                             account_name=f"{acc['name']}-{group_name}",
                             base_url=acc["base_url"],
