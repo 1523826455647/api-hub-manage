@@ -587,6 +587,24 @@
     function loadClassifyRules() {
         try {
             const saved = localStorage.getItem('classify_rules');
+            if (saved) {
+                const rules = JSON.parse(saved);
+                // Migrate old 'Claude' key to new 'Claude-官号' + 'Claude-Kiro'
+                if (rules['Claude'] && !rules['Claude-官号']) {
+                    rules['Claude-官号'] = rules['Claude'].filter(k => !['kiro','krio'].includes(k.toLowerCase()));
+                    rules['Claude-Kiro'] = rules['Claude'].filter(k => ['kiro','krio'].includes(k.toLowerCase()));
+                    delete rules['Claude'];
+                    localStorage.setItem('classify_rules', JSON.stringify(rules));
+                    return rules;
+                }
+                return rules;
+            }
+        } catch(e) {}
+        return DEFAULT_RULES;
+    }
+
+        try {
+            const saved = localStorage.getItem('classify_rules');
             if (saved) return JSON.parse(saved);
         } catch (e) {}
         return structuredClone(DEFAULT_RULES);
@@ -706,6 +724,7 @@
             if (!acc.groups || !acc.groups.length) return;
             acc.groups.forEach(g => {
                 const cat = classifyGroup(g.name);
+                if (!matrix[cat]) matrix[cat] = {};
                 if (!(acc.name in matrix[cat]) || g.ratio < matrix[cat][acc.name]) {
                     matrix[cat][acc.name] = g.ratio;
                 }
