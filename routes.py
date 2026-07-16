@@ -480,62 +480,62 @@ async def dashboard(force: bool = Query(False, description="强制刷新，忽�
             return {"success": True, "data": cached}
 
     accounts = _load_accounts()
+    import asyncio
+
     total_balance = 0.0
     today_cost = 0.0
     total_cost = 0.0
     error_count = 0
     account_summaries = []
 
-    for account in accounts:
+    async def _fetch_one(account):
         adapter = _get_adapter(account)
-        recharge_ratio = account.get("recharge_ratio", 1.0) or 1.0
-        summary = {
-            "id": account["id"],
-            "name": account["name"],
-            "platform": account["platform"],
-            "base_url": account["base_url"],
-            "recharge_ratio": recharge_ratio,
-            "credential_type": account.get("credential_type", "token"),
-        }
+        rr = account.get("recharge_ratio", 1.0) or 1.0
+        s = {"id": account["id"], "name": account["name"], "platform": account["platform"],
+             "base_url": account["base_url"], "recharge_ratio": rr,
+             "credential_type": account.get("credential_type", "token")}
+        for fn, key, err_key in [(adapter.get_balance, "balance", None),
+                                  (adapter.get_usage, "usage", None),
+                                  (adapter.get_groups, "groups", None)]:
+            try:
+                r = await asyncio.wait_for(fn(), timeout=12)
+                if key == "balance":
+                    s["balance"] = r.get("balance", 0)
+                    s["group"] = r.get("group", "")
+                elif key == "usage":
+                    s["today_cost"] = r.get("today_cost", 0)
+                    s["total_cost"] = r.get("total_cost", 0)
+                elif key == "groups":
+                    for g in r:
+                        g["raw_ratio"] = g.get("ratio", 1.0)
+                        g["ratio"] = round(g.get("ratio", 1.0) / rr, 6)
+                        g["effective"] = True
+                    s["groups"] = r
+            except asyncio.TimeoutError:
+                if key == "balance": s["balance"] = None; s["error"] = "请求超时"
+                elif key == "usage": s["today_cost"] = None; s["total_cost"] = None
+                elif key == "groups": s["groups"] = []
+            except Exception as e:
+                em = str(e)
+                if key == "balance":
+                    s["balance"] = None
+                    if "User API Key" in em: s["balance_note"] = em
+                    else: s["error"] = em
+                elif key == "groups": s["groups"] = []
+        return s
 
-        try:
-            balance = await adapter.get_balance()
-            summary["balance"] = balance.get("balance", 0)
-            summary["group"] = balance.get("group", "")
-            total_balance += summary["balance"]
-        except Exception as e:
-            summary["balance"] = None
-            err_msg = str(e)
-            if "User API Key" in err_msg:
-                summary["balance_note"] = err_msg
-            else:
-                summary["error"] = err_msg
-                error_count += 1
-
-        try:
-            usage = await adapter.get_usage()
-            summary["today_cost"] = usage.get("today_cost", 0)
-            summary["total_cost"] = usage.get("total_cost", 0)
-            today_cost += summary.get("today_cost", 0) or 0
-            total_cost += summary.get("total_cost", 0) or 0
-        except Exception:
-            summary["today_cost"] = None
-            summary["total_cost"] = None
-
-        try:
-            groups = await adapter.get_groups()
-            for g in groups:
-                g["raw_ratio"] = g.get("ratio", 1.0)
-                g["ratio"] = round(g.get("ratio", 1.0) / recharge_ratio, 6)
-                g["effective"] = True
-            summary["groups"] = groups
-        except Exception as e:
-            summary["groups"] = []
-            if "User API Key" not in str(e):
-                if not summary.get("error"):
-                    summary["error"] = str(e)
-
-        account_summaries.append(summary)
+    results = await asyncio.gather(*[_fetch_one(a) for a in accounts], return_exceptions=True)
+    for s in results:
+        if isinstance(s, Exception):
+            account_summaries.append({"error": str(s)})
+            error_count += 1
+            continue
+        account_summaries.append(s)
+        if s.get("balance"): total_balance += s["balance"]
+        if s.get("today_cost"): today_cost += s["today_cost"] or 0
+        if s.get("total_cost"): total_cost += s["total_cost"] or 0
+        if s.get("error") and "User API Key" not in str(s.get("error","")):
+            error_count += 1
 
     result = {
         "total_balance": round(total_balance, 4),
