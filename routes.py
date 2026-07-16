@@ -471,17 +471,23 @@ async def check_turnstile(req: dict):
 
 @router.get("/dashboard")
 async def dashboard(force: bool = Query(False, description="强制刷新，忽略缓存")):
-    """仪表盘汇总 - 持久缓存，仅手动刷新 / 定时刷新时重新拉取"""
+    """仪表盘汇总 - 打开页面秒出缓存，点刷新才拉上游"""
     cache_key = "dashboard"
     if not force:
-        cached = _cache_get(cache_key, CACHE_TTL_DASHBOARD)
+        cached = _cache.get(cache_key, {}).get("data")
         if cached:
             cached["from_cache"] = True
             return {"success": True, "data": cached}
+        else:
+            # 首次启动无缓存，返回空壳避免阻塞
+            return {"success": True, "data": {
+                "total_balance": 0, "today_cost": 0, "total_cost": 0,
+                "account_count": len(_load_accounts()), "error_count": 0,
+                "accounts": [], "cached_at": 0, "from_cache": False,
+                "empty": True,
+            }}
 
     accounts = _load_accounts()
-    import asyncio
-
     total_balance = 0.0
     today_cost = 0.0
     total_cost = 0.0
