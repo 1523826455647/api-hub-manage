@@ -850,14 +850,15 @@ async def provision_account(req: dict):
     if not account:
         raise HTTPException(status_code=404, detail="渠道不存在")
 
-    upstream_key = account.get("upstream_key", "") or account.get("access_token", "")
+    upstream_key = _resolve_upstream_key(account, group_name)
     if not upstream_key:
         raise HTTPException(status_code=400,
-                            detail="该渠道未配置上游 API Key。请编辑渠道或添加时填写「上游 API Key」字段（sk- 密钥）")
-    # Cookie 不能作为上游 Key
-    if account.get("credential_type") == "cookie" and not account.get("upstream_key"):
+                            detail=f"分组「{group_name}」未配置上游 API Key。请在扫描器中为该分组设置密钥，或在渠道中填写上游 Key")
+    # Cookie 不能作为上游 Key（除非有分组级 Key 覆盖）
+    if (account.get("credential_type") == "cookie" and not account.get("upstream_key")
+            and not _get_group_key(account_id, group_name)):
         raise HTTPException(status_code=400,
-                            detail="该渠道使用 Cookie 鉴权，无法作为上游。请去目标站点生成 sk- 密钥填入「上游 API Key」")
+                            detail="该渠道使用 Cookie 鉴权且未设置分组密钥。请在扫描器中为具体分组设置 sk- 密钥")
 
     platform = _group_to_platform(group_name, account.get("platform"))
 
@@ -1002,11 +1003,12 @@ async def auto_sync():
 
     for acc in accounts_data:
         stored = next((a for a in stored_accounts if a["id"] == acc["id"]), {})
-        upstream_key = stored.get("upstream_key", "") or stored.get("access_token", "")
+        upstream_key = _resolve_upstream_key(stored, g.get("name", ""))
         if not upstream_key:
             continue  # 无可用上游 key
-        # Cookie 无独立 upstream_key 时不能用于上游调用
-        if stored.get("credential_type") == "cookie" and not stored.get("upstream_key"):
+        # Cookie 无独立 key 且无分组密钥时不能用于上游调用
+        if (stored.get("credential_type") == "cookie" and not stored.get("upstream_key")
+                and not _get_group_key(acc["id"], g.get("name", ""))):
             continue
 
         for g in (acc.get("groups") or []):
@@ -1110,6 +1112,83 @@ async def auto_sync():
             "log": log,
         },
     }
+
+
+# === 分组级 API Key 管理 ===
+
+GROUP_KEYS_FILE = DATA_DIR / "group_keys.json"
+
+
+def _load_group_keys() -> dict[str, str]:
+    """加载分组密钥映射 { 'account_id/group_name': 'sk-xxx' }"""
+    if not GROUP_KEYS_FILE.exists():
+        return {}
+    try:
+        return json.loads(GROUP_KEYS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_group_keys(keys: dict[str, str]):
+    GROUP_KEYS_FILE.write_text(
+        json.dumps(keys, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _get_group_key(account_id: str, group_name: str) -> str:
+    """获取分组级 Key，没有则返回空"""
+    return _load_group_keys().get(f"{account_id}/{group_name}", "")
+
+
+@router.get("/group-keys")
+async def list_group_keys():
+    """列出所有分组密钥"""
+    keys = _load_group_keys()
+    result = []
+    for k, v in keys.items():
+        parts = k.split("/", 1)
+        result.append({
+            "account_id": parts[0],
+            "group_name": parts[1] if len(parts) > 1 else "",
+            "api_key": v[:12] + "****" + v[-4:] if len(v) > 16 else "****",
+            "has_key": True,
+        })
+    return {"success": True, "data": result}
+
+
+@router.post("/group-keys")
+async def set_group_key(req: dict):
+    """设置一个分组的 API Key"""
+    account_id = req.get("account_id", "")
+    group_name = req.get("group_name", "")
+    api_key = req.get("api_key", "").strip()
+    if not account_id or not group_name:
+        raise HTTPException(status_code=400, detail="缺少 account_id 或 group_name")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="缺少 api_key")
+    keys = _load_group_keys()
+    keys[f"{account_id}/{group_name}"] = api_key
+    _save_group_keys(keys)
+    return {"success": True, "message": "分组密钥已保存"}
+
+
+@router.delete("/group-keys/{account_id}/{group_name}")
+async def delete_group_key(account_id: str, group_name: str):
+    """删除一个分组的 API Key"""
+    keys = _load_group_keys()
+    key = f"{account_id}/{group_name}"
+    if key in keys:
+        del keys[key]
+        _save_group_keys(keys)
+    return {"success": True, "message": "分组密钥已删除"}
+
+
+def _resolve_upstream_key(account: dict, group_name: str) -> str:
+    """解析上游 Key：分组级 > 账号级 > access_token"""
+    gk = _get_group_key(account["id"], group_name)
+    if gk:
+        return gk
+    return account.get("upstream_key", "") or account.get("access_token", "")
 
 
 _PLATFORM_KEYWORDS: list[tuple[str, str]] = [

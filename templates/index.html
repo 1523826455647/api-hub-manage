@@ -825,6 +825,10 @@
         if (act === 'detail' && id) return showAccountDetail(id);
         if (act === 'provision' && id !== undefined) return doProvision(Number(id));
         if (act === 'sync-ratio' && mid) return doSyncRatio(mid);
+        if (act === 'set-group-key') {
+            const aid = btn.dataset.aid; const gname = btn.dataset.gname;
+            if (aid && gname) return showSetGroupKey(aid, gname);
+        }
         if (act === 'delete-mapping' && mid) {
             if (!confirm('删除映射不会删除 Hub 上已有的账号/分组，确定？')) return;
             try { await api('DELETE', `/scanner/mappings/${encodeURIComponent(mid)}`); toast('映射已删除'); loadMappings(); doScan(); }
@@ -1125,6 +1129,7 @@
         } catch(e) {}
         $('#scannerThreshold').textContent = `≤ ${thr}x`;
         loadMappings();
+        loadGroupKeys();
     }
 
     async function doScan() {
@@ -1148,14 +1153,20 @@
             if (!candidates.length) {
                 h += '<div class="empty"><div class="empty-icon">🎉</div><h3>没有发现超低价分组</h3></div>';
             } else {
-                h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr><th>渠道</th><th>平台</th><th>分组名</th><th>有效倍率</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+                h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr><th>渠道</th><th>平台</th><th>分组名</th><th>有效倍率</th><th>Key</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+                const gkMap = window.__groupKeys || {};
                 candidates.forEach((c, i) => {
                     const rawNote = (c.raw_ratio != null && c.raw_ratio !== c.ratio)
                         ? `（原始 ${c.raw_ratio}x）` : '';
+                    const gkKey = `${c.id}/${c.group_name}`;
+                    const hasGroupKey = !!gkMap[gkKey];
+                    let keyHtml = hasGroupKey
+                        ? `<span style="color:var(--success);font-size:11px;cursor:pointer" title="点击更换密钥" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}">✓ 已设置</span>`
+                        : `<button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:3px 8px">设置密钥</button>`;
                     let statusHtml = '';
                     if (c.mapped) {
                         if (c.ratio_changed) {
-                            statusHtml = `<span style="color:var(--warning);font-size:11px">⚠ 倍率已变 (${c.last_ratio}x→${c.ratio}x)</span>`;
+                            statusHtml = `<span style="color:var(--warning);font-size:11px">⚠ 倍率已变</span>`;
                         } else {
                             statusHtml = `<span style="color:var(--success);font-size:11px">✓ 已配置</span>`;
                         }
@@ -1176,6 +1187,7 @@
                         <td><span class="ch-tag tag-${esc(c.platform)}">${esc(c.platform)}</span></td>
                         <td style="font-weight:600">${esc(c.group_name)}</td>
                         <td class="best">${c.ratio}x <span style="font-size:10px;color:var(--text-muted)">${rawNote}</span></td>
+                        <td>${keyHtml}</td>
                         <td>${statusHtml}</td>
                         <td>${opHtml}</td>
                     </tr>`;
@@ -1272,6 +1284,72 @@
             loadMappings();
         } catch(e) {
             el.innerHTML = `<div class="empty" style="color:var(--danger)"><div class="empty-icon">⚠</div><h3>同步失败</h3><p>${esc(e.message)}</p></div>`;
+        }
+    }
+
+    // ========== group key management ==========
+    async function loadGroupKeys() {
+        try {
+            const { data } = await api('GET', '/group-keys');
+            const map = {};
+            (data || []).forEach(gk => {
+                map[`${gk.account_id}/${gk.group_name}`] = gk;
+            });
+            window.__groupKeys = map;
+        } catch(e) { window.__groupKeys = {}; }
+    }
+
+    async function showSetGroupKey(accountId, groupName) {
+        const gkMap = window.__groupKeys || {};
+        const gkKey = `${accountId}/${groupName}`;
+        const existing = gkMap[gkKey];
+        openModal('设置分组密钥',
+            `<p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">
+                为「<strong>${esc(groupName)}</strong>」设置上游 API Key<br>
+                <span style="font-size:11px">该密钥将用于 Sub2API 调用此分组的上游接口</span>
+            </p>
+            <div class="redeem-row">
+                <input id="gkInput" placeholder="sk-xxxxxxxx" value="${existing ? '****' : ''}" autocomplete="off" spellcheck="false">
+                <button class="btn btn-primary" type="button" id="gkSaveBtn">保存</button>
+                ${existing ? `<button class="btn btn-danger" type="button" id="gkDelBtn">删除</button>` : ''}
+            </div>
+            <div id="gkResult" style="margin-top:10px"></div>`
+        );
+        const doSave = async () => {
+            const val = $('#gkInput').value.trim();
+            if (!val) return;
+            try {
+                await api('POST', '/group-keys', {
+                    account_id: accountId, group_name: groupName, api_key: val
+                });
+                $('#gkResult').innerHTML = '<span style="color:var(--success);font-size:13px">✓ 已保存</span>';
+                loadGroupKeys();
+                if (window.__scanCandidates) {
+                    // Re-render to update key status
+                    const el = $('#scanContent');
+                    // Quick re-render by updating the key column
+                    await loadGroupKeys();
+                    doScan();
+                }
+                setTimeout(closeModal, 800);
+            } catch(e) {
+                $('#gkResult').innerHTML = `<span style="color:var(--danger);font-size:13px">${esc(e.message)}</span>`;
+            }
+        };
+        $('#gkSaveBtn').addEventListener('click', doSave);
+        $('#gkInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSave(); });
+        if (existing) {
+            $('#gkDelBtn').addEventListener('click', async () => {
+                if (!confirm('确认删除此分组的密钥？删除后将回退到渠道级上游 Key。')) return;
+                try {
+                    await api('DELETE', `/group-keys/${encodeURIComponent(accountId)}/${encodeURIComponent(groupName)}`);
+                    $('#gkResult').innerHTML = '<span style="color:var(--success)">✓ 已删除</span>';
+                    loadGroupKeys();
+                    setTimeout(closeModal, 800);
+                } catch(e) {
+                    $('#gkResult').innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+                }
+            });
         }
     }
 
