@@ -2,6 +2,9 @@
 data/accounts.json
 data/settings.json
 data/ratio_history.json
+data/dashboard_cache.json
+data/group_keys.json
+data/provision_mappings.json
 
 # Python
 __pycache__/

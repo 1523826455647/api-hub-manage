@@ -70,16 +70,37 @@ def _save_settings(settings: dict):
 
 
 # === 缓存系统 ===
-# 内存缓存：避免每次刷新都请求上游站点
-# 格式: { key: { "data": ..., "ts": timestamp } }
+# 内存 + 磁盘持久缓存：避免频繁请求上游站点，重启不丢
 _cache: dict[str, dict[str, Any]] = {}
 
-CACHE_TTL_DASHBOARD = 300  # 仪表盘整体缓存 5 分钟
-CACHE_TTL_ACCOUNT = 180    # 单个账号数据缓存 3 分钟
+CACHE_TTL_ACCOUNT = 180  # 单个账号数据缓存 3 分钟（仅 account 级接口使用）
+
+DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard_cache.json"
+
+
+def _load_disk_cache():
+    """启动时从磁盘恢复 dashboard 缓存"""
+    global _cache
+    if DASHBOARD_CACHE_FILE.exists():
+        try:
+            data = json.loads(DASHBOARD_CACHE_FILE.read_text(encoding="utf-8"))
+            _cache["dashboard"] = {"data": data, "ts": data.get("cached_at", time.time())}
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
+def _save_disk_cache(data: dict):
+    """保存 dashboard 缓存到磁盘"""
+    try:
+        DASHBOARD_CACHE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def _cache_get(key: str, ttl: int) -> Any | None:
-    """读取缓存，过期返回 None"""
+    """读取缓存，过期返回 None（仅 account 级接口使用）"""
     entry = _cache.get(key)
     if entry and (time.time() - entry["ts"]) < ttl:
         return entry["data"]
@@ -95,10 +116,15 @@ def _cache_invalidate(prefix: str = ""):
     """清除指定前缀的缓存，为空则清除全部"""
     if not prefix:
         _cache.clear()
+        # 重新加载磁盘缓存
+        _load_disk_cache()
     else:
         keys = [k for k in _cache if k.startswith(prefix)]
         for k in keys:
             del _cache[k]
+
+# 启动时加载磁盘缓存
+_load_disk_cache()
 
 
 def _get_adapter(account: dict):
@@ -388,6 +414,7 @@ async def get_overview(account_id: str, force: bool = Query(False)):
         result["usage"] = {"error": str(e)}
 
     _cache_set(cache_key, result)
+    _save_disk_cache(result)  # persist to disk
     return {"success": True, "data": result}
 
 
