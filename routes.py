@@ -488,48 +488,38 @@ async def dashboard(force: bool = Query(False, description="强制刷新，忽�
     error_count = 0
     account_summaries = []
 
-    async def _fetch_one(account):
+    for account in accounts:
         adapter = _get_adapter(account)
         rr = account.get("recharge_ratio", 1.0) or 1.0
         s = {"id": account["id"], "name": account["name"], "platform": account["platform"],
              "base_url": account["base_url"], "recharge_ratio": rr,
              "credential_type": account.get("credential_type", "token")}
-        for fn, key, err_key in [(adapter.get_balance, "balance", None),
-                                  (adapter.get_usage, "usage", None),
-                                  (adapter.get_groups, "groups", None)]:
-            try:
-                r = await asyncio.wait_for(fn(), timeout=12)
-                if key == "balance":
-                    s["balance"] = r.get("balance", 0)
-                    s["group"] = r.get("group", "")
-                elif key == "usage":
-                    s["today_cost"] = r.get("today_cost", 0)
-                    s["total_cost"] = r.get("total_cost", 0)
-                elif key == "groups":
-                    for g in r:
-                        g["raw_ratio"] = g.get("ratio", 1.0)
-                        g["ratio"] = round(g.get("ratio", 1.0) / rr, 6)
-                        g["effective"] = True
-                    s["groups"] = r
-            except asyncio.TimeoutError:
-                if key == "balance": s["balance"] = None; s["error"] = "请求超时"
-                elif key == "usage": s["today_cost"] = None; s["total_cost"] = None
-                elif key == "groups": s["groups"] = []
-            except Exception as e:
-                em = str(e)
-                if key == "balance":
-                    s["balance"] = None
-                    if "User API Key" in em: s["balance_note"] = em
-                    else: s["error"] = em
-                elif key == "groups": s["groups"] = []
-        return s
-
-    results = await asyncio.gather(*[_fetch_one(a) for a in accounts], return_exceptions=True)
-    for s in results:
-        if isinstance(s, Exception):
-            account_summaries.append({"error": str(s)})
-            error_count += 1
-            continue
+        try:
+            b = await adapter.get_balance()
+            s["balance"] = b.get("balance", 0)
+            s["group"] = b.get("group", "")
+        except Exception as e:
+            s["balance"] = None
+            em = str(e)
+            if "User API Key" in em: s["balance_note"] = em
+            else: s["error"] = em
+        try:
+            u = await adapter.get_usage()
+            s["today_cost"] = u.get("today_cost", 0)
+            s["total_cost"] = u.get("total_cost", 0)
+        except Exception:
+            s["today_cost"] = None; s["total_cost"] = None
+        try:
+            grps = await adapter.get_groups()
+            for g in grps:
+                g["raw_ratio"] = g.get("ratio", 1.0)
+                g["ratio"] = round(g.get("ratio", 1.0) / rr, 6)
+                g["effective"] = True
+            s["groups"] = grps
+        except Exception as e:
+            s["groups"] = []
+            if "User API Key" not in str(e) and not s.get("error"):
+                s["error"] = str(e)
         account_summaries.append(s)
         if s.get("balance"): total_balance += s["balance"]
         if s.get("today_cost"): today_cost += s["today_cost"] or 0

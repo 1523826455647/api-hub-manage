@@ -31,7 +31,7 @@ class Sub2APIAdmin:
 
     async def login(self, email: str, password: str) -> str:
         """管理员登录，返回 JWT access_token"""
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v1/auth/login",
                 json={"email": email, "password": password},
@@ -43,7 +43,7 @@ class Sub2APIAdmin:
             return self.jwt
 
     async def _request(self, method: str, path: str, json: dict = None) -> dict:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             r = await client.request(method, f"{self.base_url}{path}", headers=self._headers(),
                                      json=json or None)
             data = r.json()
