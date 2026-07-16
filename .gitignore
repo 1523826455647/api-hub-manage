@@ -1,0 +1,26 @@
+# 敏感数据 — 包含账号密码、Token、API Key
+data/accounts.json
+data/settings.json
+data/ratio_history.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
+.plan
+
+# OS
+.DS_Store
+Thumbs.db

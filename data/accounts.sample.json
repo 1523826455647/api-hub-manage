@@ -1,0 +1,16 @@
+[
+  {
+    "id": "示例ID",
+    "name": "示例渠道名",
+    "platform": "newapi",
+    "base_url": "https://api.example.com",
+    "auth_type": "token",
+    "credential_type": "user_api_key",
+    "username": "",
+    "password": "",
+    "access_token": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "refresh_token": "",
+    "user_id": "",
+    "recharge_ratio": 1.0
+  }
+]
