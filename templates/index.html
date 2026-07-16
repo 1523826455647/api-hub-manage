@@ -237,21 +237,24 @@
             <div class="page-toolbar">
                 <div>
                     <h1>低价扫描器</h1>
-                    <div class="sub">扫描所有渠道中低于阈值的分组，一键配置到 Sub2API Hub</div>
+                    <div class="sub">扫描 → 自动建上游 → 倍率变化自动同步</div>
                 </div>
                 <div class="toolbar-actions">
                     <span style="font-size:12px;color:var(--text-muted)">阈值:</span>
                     <span id="scannerThreshold" style="font-weight:700;font-size:14px">—</span>
                     <button class="btn btn-primary" type="button" id="btnScan">开始扫描</button>
+                    <button class="btn btn-primary" type="button" id="btnAutoSync" style="background:var(--success)">⚡ 一键全自动同步</button>
                 </div>
             </div>
             <div id="scanContent">
                 <div class="empty">
                     <div class="empty-icon">🔍</div>
                     <h3>准备扫描</h3>
-                    <p>点击「开始扫描」查找低于阈值的超低价分组</p>
+                    <p>点击「开始扫描」查看低价分组，或「一键全自动同步」直接推送到 Hub</p>
                 </div>
             </div>
+            <!-- 已配置映射列表 -->
+            <div style="margin-top:24px" id="mappingsSection"></div>
         </section>
 
         <!-- Account detail -->
@@ -811,11 +814,18 @@
         if (!btn) return;
         const act = btn.dataset.act;
         const id = btn.dataset.id;
+        const mid = btn.dataset.mid;
         if (act === 'delete' && id) return doDelete(id);
         if (act === 'refresh' && id) return doRefresh(id, btn);
         if (act === 'redeem' && id) return showRedeem(id);
         if (act === 'detail' && id) return showAccountDetail(id);
         if (act === 'provision' && id !== undefined) return doProvision(Number(id));
+        if (act === 'sync-ratio' && mid) return doSyncRatio(mid);
+        if (act === 'delete-mapping' && mid) {
+            if (!confirm('删除映射不会删除 Hub 上已有的账号/分组，确定？')) return;
+            try { await api('DELETE', `/scanner/mappings/${encodeURIComponent(mid)}`); toast('映射已删除'); loadMappings(); doScan(); }
+            catch(e) { toast(e.message, false); }
+        }
     });
 
     async function doDelete(id) {
@@ -1110,73 +1120,188 @@
             thr = String(data.ultra_low_rate || 0.6);
         } catch(e) {}
         $('#scannerThreshold').textContent = `≤ ${thr}x`;
+        loadMappings();
     }
 
     async function doScan() {
         const el = $('#scanContent');
-        el.innerHTML = '<div class="loading-block"><span class="spin"></span> 扫描中，正在拉取最新数据…</div>';
-        // Trigger force refresh first to get latest data, then scan
+        el.innerHTML = '<div class="loading-block"><span class="spin"></span> 扫描中…</div>';
         try {
             await api('GET', '/dashboard?force=true');
             const { data } = await api('POST', '/scanner/scan');
             const candidates = data.candidates || [];
             const threshold = data.threshold || 0.6;
+            window.__scanCandidates = candidates;
+
             let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
-                <div class="section-title" style="margin-bottom:0">扫描结果 <span style="color:var(--text-muted);font-weight:600;font-size:12px">${candidates.length} 个低价分组（阈值 ≤ ${threshold}x）</span></div>
-                <button class="btn btn-primary" type="button" id="btnProvAll">一键全部配置</button>
+                <div class="section-title" style="margin-bottom:0">扫描结果 <span style="color:var(--text-muted);font-weight:600;font-size:12px">${candidates.length} 个低价分组（≤ ${threshold}x）</span></div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn btn-ghost" type="button" id="btnProvNew">仅配置未映射</button>
+                    <button class="btn btn-primary" type="button" id="btnProvAll">一键全部配置</button>
+                </div>
             </div>`;
 
             if (!candidates.length) {
-                h += '<div class="empty"><div class="empty-icon">🎉</div><h3>没有发现超低价分组</h3><p>当前所有分组倍率均不低于阈值</p></div>';
+                h += '<div class="empty"><div class="empty-icon">🎉</div><h3>没有发现超低价分组</h3></div>';
             } else {
-                h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr><th>渠道</th><th>平台</th><th>分组名</th><th>有效倍率</th><th>操作</th></tr></thead><tbody>';
+                h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr><th>渠道</th><th>平台</th><th>分组名</th><th>有效倍率</th><th>状态</th><th>操作</th></tr></thead><tbody>';
                 candidates.forEach((c, i) => {
                     const rawNote = (c.raw_ratio != null && c.raw_ratio !== c.ratio)
                         ? `（原始 ${c.raw_ratio}x）` : '';
+                    let statusHtml = '';
+                    if (c.mapped) {
+                        if (c.ratio_changed) {
+                            statusHtml = `<span style="color:var(--warning);font-size:11px">⚠ 倍率已变 (${c.last_ratio}x→${c.ratio}x)</span>`;
+                        } else {
+                            statusHtml = `<span style="color:var(--success);font-size:11px">✓ 已配置</span>`;
+                        }
+                    } else {
+                        statusHtml = `<span style="color:var(--text-muted);font-size:11px">未配置</span>`;
+                    }
+                    let opHtml = '';
+                    if (c.mapped) {
+                        if (c.ratio_changed) {
+                            opHtml = `<button class="btn btn-ghost" type="button" data-act="sync-ratio" data-mid="${esc(c.mapping_id)}" style="font-size:11px;padding:4px 10px;color:var(--warning)">同步倍率</button>`;
+                        }
+                        opHtml += `<button class="btn btn-ghost" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px">重新配置</button>`;
+                    } else {
+                        opHtml = `<button class="btn btn-primary" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px">配置到此 Hub</button>`;
+                    }
                     h += `<tr>
                         <td class="channel-col">${esc(c.name)}</td>
                         <td><span class="ch-tag tag-${esc(c.platform)}">${esc(c.platform)}</span></td>
                         <td style="font-weight:600">${esc(c.group_name)}</td>
                         <td class="best">${c.ratio}x <span style="font-size:10px;color:var(--text-muted)">${rawNote}</span></td>
-                        <td><button class="btn btn-ghost" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px">配置到此 Hub</button></td>
+                        <td>${statusHtml}</td>
+                        <td>${opHtml}</td>
                     </tr>`;
                 });
                 h += '</tbody></table></div>';
-                // Store candidates for provision
-                window.__scanCandidates = candidates;
             }
             el.innerHTML = h;
 
+            // Wire buttons
             el.querySelector('#btnProvAll')?.addEventListener('click', async () => {
-                if (!confirm(`确认一键配置全部 ${candidates.length} 个低价分组到 Sub2API Hub？`)) return;
-                const cands = window.__scanCandidates || [];
-                let ok = 0, fail = 0;
-                for (const c of cands) {
-                    try {
-                        await api('POST', '/scanner/provision', {
-                            account_id: c.id, group_name: c.group_name, ratio: c.ratio
-                        });
-                        ok++;
-                    } catch(e) { fail++; toast(e.message, false); }
-                }
-                toast(`完成：${ok} 成功，${fail} 失败`);
-                if (ok) loadScanner();
+                if (!confirm(`一键配置全部 ${candidates.length} 个分组？已映射的会跳过。`)) return;
+                await batchProvision(candidates);
+            });
+            el.querySelector('#btnProvNew')?.addEventListener('click', async () => {
+                const fresh = candidates.filter(c => !c.mapped);
+                if (!fresh.length) { toast('所有分组已配置'); return; }
+                if (!confirm(`配置 ${fresh.length} 个未映射的分组？`)) return;
+                await batchProvision(fresh);
             });
         } catch(e) {
             el.innerHTML = `<div class="empty" style="color:var(--danger)"><div class="empty-icon">⚠</div><h3>扫描失败</h3><p>${esc(e.message)}</p></div>`;
         }
     }
 
+    async function batchProvision(cands) {
+        let ok = 0, skip = 0, fail = 0;
+        for (const c of cands) {
+            const btn = document.querySelector(`[data-idx="${cands.indexOf(c)}"]`);
+            try {
+                const r = await api('POST', '/scanner/provision', {
+                    account_id: c.id, group_name: c.group_name, ratio: c.ratio
+                });
+                if (r.data?.status === 'skipped') { skip++; }
+                else { ok++; }
+            } catch(e) { fail++; toast(e.message, false); }
+        }
+        toast(`完成：${ok} 新增，${skip} 跳过（已存在），${fail} 失败`);
+        doScan();
+        loadMappings();
+    }
+
     async function doProvision(idx) {
         const c = (window.__scanCandidates || [])[idx];
         if (!c) return;
-        if (!confirm(`确认将「${c.name} - ${c.group_name}」（倍率 ${c.ratio}x）配置到 Sub2API Hub？`)) return;
+        if (!confirm(`将「${c.name} - ${c.group_name}」（${c.ratio}x）配置到 Hub？`)) return;
         try {
-            const { data } = await api('POST', '/scanner/provision', {
+            const r = await api('POST', '/scanner/provision', {
                 account_id: c.id, group_name: c.group_name, ratio: c.ratio
             });
-            toast(`已配置：${data.group?.name || 'OK'}`);
+            if (r.data?.status === 'skipped') {
+                toast('该分组已配置，跳过');
+            } else {
+                toast(`已配置：${r.data?.group?.name || 'OK'}`);
+            }
+            doScan();
+            loadMappings();
         } catch(e) { toast(e.message, false); }
+    }
+
+    async function doSyncRatio(mappingId) {
+        if (!confirm('确认同步倍率到 Hub？这将更新对应分组的 rate_multiplier。')) return;
+        try {
+            const r = await api('POST', `/scanner/sync-ratio?mapping_id=${encodeURIComponent(mappingId)}`);
+            if (r.data?.status === 'unchanged') {
+                toast('倍率未变化，无需同步');
+            } else {
+                toast(`倍率已同步：${r.data?.old_ratio}x → ${r.data?.new_ratio}x`);
+            }
+            doScan();
+            loadMappings();
+        } catch(e) { toast(e.message, false); }
+    }
+
+    async function doAutoSync() {
+        if (!confirm('一键全自动同步将：\n1. 强制刷新所有渠道数据\n2. 为新低价分组创建 Hub 上游账号\n3. 更新已变化的分组倍率\n\n继续？')) return;
+        const el = $('#scanContent');
+        el.innerHTML = '<div class="loading-block"><span class="spin"></span> 全自动同步中，这可能需要一些时间…</div>';
+        try {
+            const r = await api('POST', '/scanner/auto-sync');
+            const s = r.data.summary;
+            let msg = `同步完成：${s.new} 新增，${s.updated} 更新，${s.skipped} 跳过`;
+            if (s.errors) msg += `，${s.errors} 失败`;
+            toast(msg);
+            // Show log
+            let h = `<div class="section-title">同步日志</div>`;
+            h += `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${msg}</div>`;
+            h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><tbody>';
+            (r.data.log || []).forEach(l => {
+                const icon = l.action === 'created' ? '✅' : l.action === 'update_ratio' ? '🔄' : l.action === 'skipped' ? '⏭️' : '❌';
+                h += `<tr><td>${icon}</td><td>${esc(l.group || '')}</td><td style="font-size:11px;color:var(--text-muted)">${esc(l.action)} ${l.ratio ? esc(l.ratio)+'x' : ''} ${l.error ? esc(l.error) : ''}</td></tr>`;
+            });
+            h += '</tbody></table></div>';
+            el.innerHTML = h;
+            loadMappings();
+        } catch(e) {
+            el.innerHTML = `<div class="empty" style="color:var(--danger)"><div class="empty-icon">⚠</div><h3>同步失败</h3><p>${esc(e.message)}</p></div>`;
+        }
+    }
+
+    async function loadMappings() {
+        try {
+            const { data } = await api('GET', '/scanner/mappings');
+            const mappings = data || [];
+            const el = $('#mappingsSection');
+            if (!el) return;
+            if (!mappings.length) {
+                el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);margin-top:16px">暂无配置映射，扫描后配置即可建立</div>';
+                return;
+            }
+            let h = `<div class="section-title" style="margin-top:8px">已配置映射 <span style="color:var(--text-muted);font-weight:600;font-size:12px">${mappings.length} 条</span></div>
+            <div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr>
+                <th>上游渠道</th><th>上游分组</th><th>有效倍率</th><th>Hub 分组 ID</th><th>Hub 账号</th><th>上次同步</th><th>操作</th>
+            </tr></thead><tbody>`;
+            mappings.forEach(m => {
+                h += `<tr>
+                    <td class="channel-col" title="${esc(m.upstream_base_url)}">${esc(m.upstream_account_name)}</td>
+                    <td style="font-weight:600">${esc(m.upstream_group_name)}</td>
+                    <td style="font-variant-numeric:tabular-nums">${m.last_ratio != null ? esc(m.last_ratio)+'x' : '—'}</td>
+                    <td>${esc(m.hub_group_id)}</td>
+                    <td style="font-size:11px">${esc(m.hub_account_name)}</td>
+                    <td style="font-size:11px;color:var(--text-muted)">${esc(m.last_sync)}</td>
+                    <td>
+                        <button class="btn btn-ghost" type="button" data-act="sync-ratio" data-mid="${esc(m.id)}" style="font-size:10px;padding:3px 8px">同步倍率</button>
+                        <button class="btn btn-danger" type="button" data-act="delete-mapping" data-mid="${esc(m.id)}" style="font-size:10px;padding:3px 8px">删除</button>
+                    </td>
+                </tr>`;
+            });
+            h += '</tbody></table></div>';
+            el.innerHTML = h;
+        } catch(e) { /* ignore */ }
     }
 
     // ========== account detail + ratio history ==========
@@ -1340,6 +1465,7 @@
         $('#btnSaveHub')?.addEventListener('click', saveHubSettings);
         $('#btnTestHub')?.addEventListener('click', testHub);
         $('#btnScan')?.addEventListener('click', doScan);
+        $('#btnAutoSync')?.addEventListener('click', doAutoSync);
         $('#btnBackDash')?.addEventListener('click', () => switchPage('dashboard'));
         $('#modalClose')?.addEventListener('click', closeModal);
         $('#modal')?.addEventListener('click', e => { if (e.target === $('#modal')) closeModal(); });

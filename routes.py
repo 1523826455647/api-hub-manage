@@ -728,12 +728,54 @@ async def test_hub():
 
 # === 扫描 + 自动配置 ===
 
+# 配置映射存储：记录上游渠道 → Sub2API Hub 的对应关系
+MAPPINGS_FILE = DATA_DIR / "provision_mappings.json"
+
+
+def _load_mappings() -> list[dict]:
+    if not MAPPINGS_FILE.exists():
+        return []
+    try:
+        return json.loads(MAPPINGS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_mappings(mappings: list[dict]):
+    MAPPINGS_FILE.write_text(
+        json.dumps(mappings, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _find_mapping(account_id: str, group_name: str) -> dict | None:
+    """查找已有的配置映射"""
+    for m in _load_mappings():
+        if m["upstream_account_id"] == account_id and m["upstream_group_name"] == group_name:
+            return m
+    return None
+
+
+@router.get("/scanner/mappings")
+async def list_mappings():
+    """列出所有已配置的上游→Hub 映射"""
+    return {"success": True, "data": _load_mappings()}
+
+
+@router.delete("/scanner/mappings/{mapping_id}")
+async def delete_mapping(mapping_id: str):
+    """删除一条配置映射（不会删除 Hub 上的账号/分组）"""
+    mappings = _load_mappings()
+    mappings = [m for m in mappings if m.get("id") != mapping_id]
+    _save_mappings(mappings)
+    return {"success": True, "message": "映射已删除"}
+
 
 @router.post("/scanner/scan")
 async def scan_low_price():
-    """扫描所有渠道，找出低于超低价阈值的分组"""
+    """扫描所有渠道，找出低于阈值的分组，并标注映射状态"""
     settings = _load_settings()
     threshold = settings.get("ultra_low_rate", 0.6)
+    mappings = _load_mappings()
 
     cached = _cache.get("dashboard", {}).get("data")
     if not cached:
@@ -751,16 +793,33 @@ async def scan_low_price():
             "platform": acc.get("platform"),
             "base_url": acc.get("base_url"),
             "recharge_ratio": acc.get("recharge_ratio", 1.0),
+            "has_upstream_key": bool(
+                (acc.get("id") and
+                 next((a for a in _load_accounts() if a["id"] == acc["id"]), {})
+                 .get("upstream_key", ""))
+                or next((a for a in _load_accounts() if a["id"] == acc["id"]), {})
+                .get("access_token", "")
+            ),
         }
         for g in (acc.get("groups") or []):
             ratio = g.get("ratio")
             if ratio is not None and ratio < threshold:
+                existing = _find_mapping(acc["id"], g.get("name", ""))
                 candidates.append({
                     **acc_info,
                     "group_name": g.get("name", ""),
                     "ratio": ratio,
                     "raw_ratio": g.get("raw_ratio", ratio),
                     "model_names": g.get("models", []),
+                    "mapped": bool(existing),
+                    "mapping_id": existing.get("id") if existing else None,
+                    "hub_group_id": existing.get("hub_group_id") if existing else None,
+                    "hub_account_id": existing.get("hub_account_id") if existing else None,
+                    "last_ratio": existing.get("last_ratio") if existing else None,
+                    "last_sync": existing.get("last_sync") if existing else None,
+                    "ratio_changed": bool(
+                        existing and abs(existing.get("last_ratio", ratio) - ratio) > 0.0001
+                    ),
                 })
 
     candidates.sort(key=lambda x: x["ratio"])
@@ -769,13 +828,22 @@ async def scan_low_price():
 
 @router.post("/scanner/provision")
 async def provision_account(req: dict):
-    """将一个扫描到的低价渠道组自动配置到 Sub2API Hub"""
+    """将一个低价分组配置到 Sub2API Hub（自动去重，已存在则跳过）"""
     account_id = req.get("account_id")
     group_name = req.get("group_name")
     ratio = req.get("ratio", 1.0)
 
     if not account_id or not group_name:
         raise HTTPException(status_code=400, detail="缺少 account_id 或 group_name")
+
+    # 检查是否已配置
+    existing = _find_mapping(account_id, group_name)
+    if existing:
+        return {
+            "success": True,
+            "data": {"status": "skipped", "reason": "已配置，无需重复创建",
+                     "mapping": existing},
+        }
 
     accounts = _load_accounts()
     account = next((a for a in accounts if a["id"] == account_id), None)
@@ -808,9 +876,233 @@ async def provision_account(req: dict):
             group_name="超低价自动化",
             group_rate=float(ratio),
         )
+        # 记录映射
+        mapping = {
+            "id": str(uuid.uuid4())[:8],
+            "upstream_account_id": account_id,
+            "upstream_account_name": account["name"],
+            "upstream_group_name": group_name,
+            "upstream_base_url": account["base_url"],
+            "platform": platform,
+            "hub_group_id": result["group"]["id"],
+            "hub_group_name": result["group"]["name"],
+            "hub_account_id": result["account"]["id"],
+            "hub_account_name": result["account"]["name"],
+            "last_ratio": ratio,
+            "last_sync": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
+            "created_at": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
+        }
+        mappings = _load_mappings()
+        mappings.append(mapping)
+        _save_mappings(mappings)
+        result["mapping"] = mapping
         return {"success": True, "data": result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/scanner/sync-ratio")
+async def sync_ratio(mapping_id: str):
+    """同步一条映射的倍率：如果上游倍率变了，更新 Hub 对应分组的 rate_multiplier"""
+    mappings = _load_mappings()
+    mapping = next((m for m in mappings if m.get("id") == mapping_id), None)
+    if not mapping:
+        raise HTTPException(status_code=404, detail="映射不存在")
+
+    # 从缓存获取当前倍率
+    cached = _cache.get("dashboard", {}).get("data")
+    if not cached:
+        raise HTTPException(status_code=400, detail="暂无数据，请先刷新仪表盘")
+
+    current_ratio = None
+    for acc in cached.get("accounts", []):
+        if acc["id"] != mapping["upstream_account_id"]:
+            continue
+        for g in (acc.get("groups") or []):
+            if g.get("name") == mapping["upstream_group_name"]:
+                current_ratio = g.get("ratio")
+                break
+
+    if current_ratio is None:
+        raise HTTPException(status_code=400, detail="未找到该分组的当前倍率，可能已被删除")
+
+    if abs(current_ratio - mapping["last_ratio"]) < 0.0001:
+        return {"success": True, "data": {"status": "unchanged", "ratio": current_ratio}}
+
+    # 更新 Hub 分组倍率
+    settings = _load_settings()
+    hub_url = settings.get("hub_base_url", "")
+    hub_email = settings.get("hub_email", "")
+    hub_password = settings.get("hub_password", "")
+    if not hub_url or not hub_email or not hub_password:
+        raise HTTPException(status_code=400, detail="请先配置 Hub")
+
+    from services.sub2api_admin import Sub2APIAdmin
+    admin = Sub2APIAdmin(hub_url)
+    try:
+        await admin.login(hub_email, hub_password)
+        await admin._request("PUT", f"/api/v1/admin/groups/{mapping['hub_group_id']}",
+                             json={"rate_multiplier": current_ratio})
+        # 更新映射记录
+        old_ratio = mapping["last_ratio"]
+        mapping["last_ratio"] = current_ratio
+        mapping["last_sync"] = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+        _save_mappings(mappings)
+        return {
+            "success": True,
+            "data": {
+                "status": "updated",
+                "old_ratio": old_ratio,
+                "new_ratio": current_ratio,
+                "hub_group_id": mapping["hub_group_id"],
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/scanner/auto-sync")
+async def auto_sync():
+    """一键全自动同步：扫描→新建→倍率更新，返回操作摘要"""
+    settings = _load_settings()
+    threshold = settings.get("ultra_low_rate", 0.6)
+    hub_url = settings.get("hub_base_url", "")
+    hub_email = settings.get("hub_email", "")
+    hub_password = settings.get("hub_password", "")
+
+    log: list[dict] = []
+    new_count = 0
+    update_count = 0
+    skip_count = 0
+    error_count = 0
+
+    # 确保有最新数据
+    await dashboard(force=True)
+    cached = _cache.get("dashboard", {}).get("data")
+    if not cached:
+        raise HTTPException(status_code=400, detail="暂无数据")
+
+    accounts_data = cached.get("accounts", [])
+    stored_accounts = _load_accounts()
+
+    # 是否需要 Hub 操作
+    need_hub = bool(hub_url and hub_email and hub_password)
+    admin = None
+    if need_hub:
+        from services.sub2api_admin import Sub2APIAdmin
+        admin = Sub2APIAdmin(hub_url)
+        try:
+            await admin.login(hub_email, hub_password)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Hub 登录失败: {e}")
+
+    for acc in accounts_data:
+        stored = next((a for a in stored_accounts if a["id"] == acc["id"]), {})
+        upstream_key = stored.get("upstream_key", "") or stored.get("access_token", "")
+        if not upstream_key:
+            continue  # 无可用的上游 key，跳过
+
+        for g in (acc.get("groups") or []):
+            ratio = g.get("ratio")
+            if ratio is None or ratio >= threshold:
+                continue
+
+            group_name = g.get("name", "")
+            existing = _find_mapping(acc["id"], group_name)
+
+            if existing:
+                # 已存在，检查倍率是否变化
+                if abs(existing["last_ratio"] - ratio) > 0.0001 and need_hub:
+                    try:
+                        await admin._request(
+                            "PUT", f"/api/v1/admin/groups/{existing['hub_group_id']}",
+                            json={"rate_multiplier": ratio})
+                        old_r = existing["last_ratio"]
+                        existing["last_ratio"] = ratio
+                        existing["last_sync"] = time.strftime("%Y-%m-%d %H:%M",
+                                                              time.localtime())
+                        log.append({
+                            "action": "update_ratio",
+                            "group": group_name,
+                            "from": old_r,
+                            "to": ratio,
+                        })
+                        update_count += 1
+                    except Exception as e:
+                        log.append({
+                            "action": "error",
+                            "group": group_name,
+                            "error": str(e),
+                        })
+                        error_count += 1
+                else:
+                    skip_count += 1
+            else:
+                # 新发现，创建
+                if need_hub:
+                    try:
+                        platform = _group_to_platform(group_name, acc.get("platform", "newapi"))
+                        result = await admin.provision_upstream(
+                            account_name=f"{acc['name']}-{group_name}",
+                            base_url=acc["base_url"],
+                            api_key=upstream_key,
+                            platform=platform,
+                            group_name="超低价自动化",
+                            group_rate=float(ratio),
+                        )
+                        mapping = {
+                            "id": str(uuid.uuid4())[:8],
+                            "upstream_account_id": acc["id"],
+                            "upstream_account_name": acc["name"],
+                            "upstream_group_name": group_name,
+                            "upstream_base_url": acc["base_url"],
+                            "platform": platform,
+                            "hub_group_id": result["group"]["id"],
+                            "hub_group_name": result["group"]["name"],
+                            "hub_account_id": result["account"]["id"],
+                            "hub_account_name": result["account"]["name"],
+                            "last_ratio": ratio,
+                            "last_sync": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
+                            "created_at": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
+                        }
+                        mappings = _load_mappings()
+                        mappings.append(mapping)
+                        _save_mappings(mappings)
+                        log.append({
+                            "action": "created",
+                            "group": group_name,
+                            "ratio": ratio,
+                            "hub_account": result["account"]["name"],
+                        })
+                        new_count += 1
+                    except Exception as e:
+                        log.append({
+                            "action": "error",
+                            "group": group_name,
+                            "error": str(e),
+                        })
+                        error_count += 1
+                else:
+                    log.append({
+                        "action": "skipped",
+                        "group": group_name,
+                        "reason": "Hub 未配置",
+                    })
+                    skip_count += 1
+
+    _save_mappings(_load_mappings())  # 确保 mapping 更新已持久化
+    return {
+        "success": True,
+        "data": {
+            "summary": {
+                "new": new_count,
+                "updated": update_count,
+                "skipped": skip_count,
+                "errors": error_count,
+            },
+            "log": log,
+        },
+    }
 
 
 _PLATFORM_KEYWORDS: list[tuple[str, str]] = [
