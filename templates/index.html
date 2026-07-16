@@ -159,9 +159,13 @@
                             </span>
                         </div>
                         <div class="field form-full" id="upstreamKeyField">
-                            <label for="f_upstream_key">上游 API Key（可选）</label>
-                            <input type="text" id="f_upstream_key" placeholder="用于 Sub2API 自动配置时的上游调用凭据" autocomplete="off" spellcheck="false">
-                            <span class="hint">将别人的中转站当做你的 Sub2API 上游时，此处填写调用 API 的 Key。不填则默认复用上述 Token。</span>
+                            <label for="f_upstream_key">🔑 上游 API Key（用于 Sub2API 联动，必填）</label>
+                            <input type="text" id="f_upstream_key" placeholder="sk-xxxxxxxx（从站点设置→API Key 生成）" autocomplete="off" spellcheck="false">
+                            <span class="hint">
+                                <strong>这是实现全自动联动的关键：</strong>Sub2API 需要这个 Key 来调用上游的 /v1/chat/completions 接口。
+                                在目标站点登录后 → 个人设置 → API Key / 系统令牌 → 生成一个 sk- 开头的密钥粘贴到这里。
+                                如果你用 Cookie 登录做监控，这个 Key 必须单独填写，Cookie 不能用于上游调用。
+                            </span>
                         </div>
                         <div id="turnstileWarn" class="form-full" style="display:none"></div>
                         <div class="form-full" style="padding-top:4px;display:flex;gap:8px;flex-wrap:wrap">

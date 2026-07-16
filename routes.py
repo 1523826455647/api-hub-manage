@@ -853,7 +853,11 @@ async def provision_account(req: dict):
     upstream_key = account.get("upstream_key", "") or account.get("access_token", "")
     if not upstream_key:
         raise HTTPException(status_code=400,
-                            detail="该渠道未配置上游 API Key（请先在渠道中添加 upstream_key）")
+                            detail="该渠道未配置上游 API Key。请编辑渠道或添加时填写「上游 API Key」字段（sk- 密钥）")
+    # Cookie 不能作为上游 Key
+    if account.get("credential_type") == "cookie" and not account.get("upstream_key"):
+        raise HTTPException(status_code=400,
+                            detail="该渠道使用 Cookie 鉴权，无法作为上游。请去目标站点生成 sk- 密钥填入「上游 API Key」")
 
     platform = _group_to_platform(group_name, account.get("platform"))
 
@@ -1000,7 +1004,10 @@ async def auto_sync():
         stored = next((a for a in stored_accounts if a["id"] == acc["id"]), {})
         upstream_key = stored.get("upstream_key", "") or stored.get("access_token", "")
         if not upstream_key:
-            continue  # 无可用的上游 key，跳过
+            continue  # 无可用上游 key
+        # Cookie 无独立 upstream_key 时不能用于上游调用
+        if stored.get("credential_type") == "cookie" and not stored.get("upstream_key"):
+            continue
 
         for g in (acc.get("groups") or []):
             ratio = g.get("ratio")
