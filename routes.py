@@ -96,6 +96,24 @@ def _cache_invalidate(prefix: str = ""):
         for k in keys:
             del _cache[k]
 
+def _get_adapter(account: dict):
+    """根据平台类型获取对应的适配器"""
+    platform = account.get("platform", "newapi")
+    base_url = account["base_url"]
+    token = account.get("access_token", "")
+    cred_type = account.get("credential_type", "token")
+
+    if platform == "sub2api":
+        adapter = Sub2APIAdapter(base_url, token, credential_type=cred_type)
+        adapter.refresh_token = account.get("refresh_token", "")
+        return adapter
+    else:
+        adapter = NewAPIAdapter(base_url, token, credential_type=cred_type)
+        if account.get("user_id"):
+            adapter.user_id = account["user_id"]
+        return adapter
+
+
 # === 账号管理 ===
 
 @router.get("/accounts")
