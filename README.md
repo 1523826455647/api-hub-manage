@@ -116,9 +116,12 @@ python main.py
 | Hub 地址 | 你的 Sub2API 站点，如 `https://my-hub.example.com` |
 | 管理员邮箱 | Sub2API 管理员登录邮箱 |
 | 管理员密码 | Sub2API 管理员密码 |
+| Admin API Key | 可选，推荐；使用 `x-api-key` 鉴权，优先于邮箱密码 |
 | 超低价阈值 | 低于此倍率触发扫描，默认 0.6x |
 
 点「测试连接」验证。
+
+> ⚠️ **上游 API Key 必须是 `sk-` 类密钥**，不能用 Cookie / Session / JWT。Cookie 仅用于本工具监控余额与倍率；推送到 Sub2API 时请为渠道或分组单独填写上游 Key。
 
 ### 2. 添加上游渠道 + 上游 API Key
 
@@ -145,7 +148,8 @@ python main.py
 
 扫描器页面底部展示**已配置映射表**：
 
-- **同步倍率**：手动触发单条倍率同步
+- **同步倍率**：手动触发单条倍率同步（会写回本地 `last_ratio`）
+- **重新配置**：`force=true` 在 Hub 新建上游账号并更新映射
 - **删除**：删除映射记录（不删除 Hub 上已有的账号/分组）
 
 ### 5. 工作流程图

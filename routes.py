@@ -26,10 +26,11 @@ class AccountCreate(BaseModel):
     base_url: str
     auth_type: str  # token | login
     access_token: str | None = None
-    credential_type: str = "token"  # cookie | token | bearer
+    credential_type: str = "token"  # cookie | token | bearer | user_api_key
     username: str | None = None
     password: str | None = None
     recharge_ratio: float = 1.0  # 充值比例如 1:1=1.0, 1:10=10.0
+    upstream_key: str | None = None  # 用于 Sub2API 联动的 sk- 密钥
 
 
 class RedeemRequest(BaseModel):
@@ -41,6 +42,7 @@ class SettingsUpdate(BaseModel):
     hub_base_url: str | None = None
     hub_email: str | None = None
     hub_password: str | None = None
+    hub_api_key: str | None = None  # 可选：Admin x-api-key，优先于邮箱密码
     ultra_low_rate: float | None = None  # 超低价阈值，低于此倍率为超低价
 
 
@@ -262,6 +264,7 @@ async def add_account(account: AccountCreate):
         "refresh_token": "",
         "user_id": "",
         "recharge_ratio": account.recharge_ratio or 1.0,
+        "upstream_key": (account.upstream_key or "").strip(),
     }
 
     # Token 方式：即时校验凭据有效性
@@ -703,6 +706,14 @@ async def get_settings():
     masked = ""
     if cs_key:
         masked = cs_key[:6] + "****" + cs_key[-4:] if len(cs_key) > 10 else "****"
+    hub_key = settings.get("hub_api_key", "")
+    hub_key_masked = ""
+    if hub_key:
+        hub_key_masked = hub_key[:4] + "****" + hub_key[-4:] if len(hub_key) > 8 else "****"
+    hub_ready = bool(
+        settings.get("hub_base_url")
+        and (settings.get("hub_api_key") or (settings.get("hub_email") and settings.get("hub_password")))
+    )
     return {
         "success": True,
         "data": {
@@ -710,8 +721,10 @@ async def get_settings():
             "capsolver_configured": bool(cs_key),
             "hub_base_url": settings.get("hub_base_url", ""),
             "hub_email": settings.get("hub_email", ""),
-            "hub_configured": bool(settings.get("hub_base_url") and settings.get("hub_email")),
+            "hub_configured": hub_ready,
             "hub_password_set": bool(settings.get("hub_password")),
+            "hub_api_key_set": bool(hub_key),
+            "hub_api_key_masked": hub_key_masked,
             "ultra_low_rate": settings.get("ultra_low_rate", 0.6),
         },
     }
@@ -727,8 +740,10 @@ async def update_settings(req: SettingsUpdate):
         settings["hub_base_url"] = req.hub_base_url.rstrip("/") if req.hub_base_url else ""
     if req.hub_email is not None:
         settings["hub_email"] = req.hub_email
-    if req.hub_password is not None:
+    if req.hub_password is not None and req.hub_password != "":
         settings["hub_password"] = req.hub_password
+    if req.hub_api_key is not None and req.hub_api_key != "":
+        settings["hub_api_key"] = req.hub_api_key
     if req.ultra_low_rate is not None:
         settings["ultra_low_rate"] = req.ultra_low_rate
     _save_settings(settings)
@@ -833,20 +848,30 @@ async def get_ratio_history(account_id: str):
 # === Sub2API Hub 配置 ===
 
 
+async def _get_hub_admin():
+    """根据设置构建并鉴权 Sub2APIAdmin；优先 x-api-key，其次邮箱密码。"""
+    settings = _load_settings()
+    base_url = settings.get("hub_base_url", "")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="请先配置 Hub 地址")
+    from services.sub2api_admin import Sub2APIAdmin
+    hub_key = (settings.get("hub_api_key") or "").strip()
+    email = settings.get("hub_email", "")
+    password = settings.get("hub_password", "")
+    if hub_key:
+        return Sub2APIAdmin(base_url, api_key=hub_key)
+    if email and password:
+        admin = Sub2APIAdmin(base_url)
+        await admin.login(email, password)
+        return admin
+    raise HTTPException(status_code=400, detail="请配置 Hub Admin API Key，或管理员邮箱+密码")
+
+
 @router.post("/hub/test")
 async def test_hub():
     """测试 Sub2API Hub 连接"""
-    settings = _load_settings()
-    base_url = settings.get("hub_base_url", "")
-    email = settings.get("hub_email", "")
-    password = settings.get("hub_password", "")
-    if not base_url or not email or not password:
-        raise HTTPException(status_code=400, detail="请先配置 Hub 地址和管理员账号")
-    from services.sub2api_admin import Sub2APIAdmin
-    admin = Sub2APIAdmin(base_url)
     try:
-        jwt = await admin.login(email, password)
-        admin.jwt = jwt
+        admin = await _get_hub_admin()
         groups = await admin.list_groups()
         return {
             "success": True,
@@ -856,6 +881,8 @@ async def test_hub():
                             "platform": g.get("platform")} for g in groups[:20]],
             },
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -927,21 +954,18 @@ async def scan_low_price():
             "platform": acc.get("platform"),
             "base_url": acc.get("base_url"),
             "recharge_ratio": acc.get("recharge_ratio", 1.0),
-            "has_upstream_key": bool(
-                (acc.get("id") and
-                 next((a for a in _load_accounts() if a["id"] == acc["id"]), {})
-                 .get("upstream_key", ""))
-                or next((a for a in _load_accounts() if a["id"] == acc["id"]), {})
-                .get("access_token", "")
-            ),
         }
+        stored_acc = next((a for a in _load_accounts() if a["id"] == acc["id"]), {})
         for g in (acc.get("groups") or []):
             ratio = g.get("ratio")
             if ratio is not None and ratio < threshold:
-                existing = _find_mapping(acc["id"], g.get("name", ""))
+                gname = g.get("name", "")
+                existing = _find_mapping(acc["id"], gname)
+                usable_key = bool(_resolve_upstream_key(stored_acc, gname))
                 candidates.append({
                     **acc_info,
-                    "group_name": g.get("name", ""),
+                    "has_upstream_key": usable_key,
+                    "group_name": gname,
                     "ratio": ratio,
                     "raw_ratio": g.get("raw_ratio", ratio),
                     "model_names": g.get("models", []),
@@ -952,7 +976,7 @@ async def scan_low_price():
                     "last_ratio": existing.get("last_ratio") if existing else None,
                     "last_sync": existing.get("last_sync") if existing else None,
                     "ratio_changed": bool(
-                        existing and abs(existing.get("last_ratio", ratio) - ratio) > 0.0001
+                        existing and abs(float(existing.get("last_ratio") or 0) - float(ratio)) > 0.0001
                     ),
                 })
 
@@ -986,17 +1010,22 @@ async def scan_low_price():
 
 @router.post("/scanner/provision")
 async def provision_account(req: dict):
-    """将一个低价分组配置到 Sub2API Hub（自动去重，已存在则跳过）"""
+    """将一个低价分组配置到 Sub2API Hub。
+
+    body:
+      account_id, group_name, ratio
+      force: true 时即使已映射也会重新创建（追加新账号，更新本地映射）
+    """
     account_id = req.get("account_id")
     group_name = req.get("group_name")
     ratio = req.get("ratio", 1.0)
+    force = bool(req.get("force"))
 
     if not account_id or not group_name:
         raise HTTPException(status_code=400, detail="缺少 account_id 或 group_name")
 
-    # 检查是否已配置
     existing = _find_mapping(account_id, group_name)
-    if existing:
+    if existing and not force:
         return {
             "success": True,
             "data": {"status": "skipped", "reason": "已配置，无需重复创建",
@@ -1008,29 +1037,14 @@ async def provision_account(req: dict):
     if not account:
         raise HTTPException(status_code=404, detail="渠道不存在")
 
-    upstream_key = _resolve_upstream_key(account, group_name)
-    if not upstream_key:
-        raise HTTPException(status_code=400,
-                            detail=f"分组「{group_name}」未配置上游 API Key。请在扫描器中为该分组设置密钥，或在渠道中填写上游 Key")
-    # Cookie 不能作为上游 Key（除非有分组级 Key 覆盖）
-    if (account.get("credential_type") == "cookie" and not account.get("upstream_key")
-            and not _get_group_key(account_id, group_name)):
-        raise HTTPException(status_code=400,
-                            detail="该渠道使用 Cookie 鉴权且未设置分组密钥。请在扫描器中为具体分组设置 sk- 密钥")
+    try:
+        upstream_key = _require_upstream_key(account, group_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     platform = _group_to_platform(group_name, account.get("platform"))
-
-    settings = _load_settings()
-    hub_url = settings.get("hub_base_url", "")
-    hub_email = settings.get("hub_email", "")
-    hub_password = settings.get("hub_password", "")
-    if not hub_url or not hub_email or not hub_password:
-        raise HTTPException(status_code=400, detail="请先在设置中配置 Sub2API Hub")
-
-    from services.sub2api_admin import Sub2APIAdmin
-    admin = Sub2APIAdmin(hub_url)
     try:
-        await admin.login(hub_email, hub_password)
+        admin = await _get_hub_admin()
         hub_gn = _hub_group_name(group_name)
         cat = _classify_group_category(group_name)
         result = await admin.provision_upstream(
@@ -1041,9 +1055,9 @@ async def provision_account(req: dict):
             group_name=hub_gn,
             group_rate=float(ratio),
         )
-        # 记录映射
+        now = time.strftime("%Y-%m-%d %H:%M", time.localtime())
         mapping = {
-            "id": str(uuid.uuid4())[:8],
+            "id": existing["id"] if existing and force else str(uuid.uuid4())[:8],
             "upstream_account_id": account_id,
             "upstream_account_name": account["name"],
             "upstream_group_name": group_name,
@@ -1054,15 +1068,20 @@ async def provision_account(req: dict):
             "hub_group_name": result["group"]["name"],
             "hub_account_id": result["account"]["id"],
             "hub_account_name": result["account"]["name"],
-            "last_ratio": ratio,
-            "last_sync": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
-            "created_at": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
+            "last_ratio": float(ratio),
+            "last_sync": now,
+            "created_at": (existing or {}).get("created_at") or now,
         }
         mappings = _load_mappings()
+        if existing and force:
+            mappings = [m for m in mappings if m.get("id") != existing.get("id")]
         mappings.append(mapping)
         _save_mappings(mappings)
         result["mapping"] = mapping
+        result["status"] = "recreated" if force and existing else "created"
         return {"success": True, "data": result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1075,7 +1094,6 @@ async def sync_ratio(mapping_id: str):
     if not mapping:
         raise HTTPException(status_code=404, detail="映射不存在")
 
-    # 从缓存获取当前倍率
     cached = _cache.get("dashboard", {}).get("data")
     if not cached:
         raise HTTPException(status_code=400, detail="暂无数据，请先刷新仪表盘")
@@ -1092,26 +1110,14 @@ async def sync_ratio(mapping_id: str):
     if current_ratio is None:
         raise HTTPException(status_code=400, detail="未找到该分组的当前倍率，可能已被删除")
 
-    if abs(current_ratio - mapping["last_ratio"]) < 0.0001:
+    if abs(float(current_ratio) - float(mapping.get("last_ratio") or 0)) < 0.0001:
         return {"success": True, "data": {"status": "unchanged", "ratio": current_ratio}}
 
-    # 更新 Hub 分组倍率
-    settings = _load_settings()
-    hub_url = settings.get("hub_base_url", "")
-    hub_email = settings.get("hub_email", "")
-    hub_password = settings.get("hub_password", "")
-    if not hub_url or not hub_email or not hub_password:
-        raise HTTPException(status_code=400, detail="请先配置 Hub")
-
-    from services.sub2api_admin import Sub2APIAdmin
-    admin = Sub2APIAdmin(hub_url)
     try:
-        await admin.login(hub_email, hub_password)
-        await admin._request("PUT", f"/api/v1/admin/groups/{mapping['hub_group_id']}",
-                             json={"rate_multiplier": current_ratio})
-        # 更新映射记录
+        admin = await _get_hub_admin()
+        await admin.update_group(mapping["hub_group_id"], rate_multiplier=float(current_ratio))
         old_ratio = mapping["last_ratio"]
-        mapping["last_ratio"] = current_ratio
+        mapping["last_ratio"] = float(current_ratio)
         mapping["last_sync"] = time.strftime("%Y-%m-%d %H:%M", time.localtime())
         _save_mappings(mappings)
         return {
@@ -1123,6 +1129,8 @@ async def sync_ratio(mapping_id: str):
                 "hub_group_id": mapping["hub_group_id"],
             },
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1132,15 +1140,13 @@ async def auto_sync():
     """一键全自动同步：扫描→新建→倍率更新，返回操作摘要"""
     settings = _load_settings()
     threshold = settings.get("ultra_low_rate", 0.6)
-    hub_url = settings.get("hub_base_url", "")
-    hub_email = settings.get("hub_email", "")
-    hub_password = settings.get("hub_password", "")
 
     log: list[dict] = []
     new_count = 0
     update_count = 0
     skip_count = 0
     error_count = 0
+    no_key_count = 0
 
     # 确保有最新数据
     await dashboard(force=True)
@@ -1151,16 +1157,22 @@ async def auto_sync():
     accounts_data = cached.get("accounts", [])
     stored_accounts = _load_accounts()
 
-    # 是否需要 Hub 操作
-    need_hub = bool(hub_url and hub_email and hub_password)
+    # 整次同步共用一份 mappings，结束时统一落盘（避免倍率更新丢失）
+    mappings = _load_mappings()
+
+    def find_in_mappings(account_id: str, group_name: str) -> dict | None:
+        for m in mappings:
+            if m.get("upstream_account_id") == account_id and m.get("upstream_group_name") == group_name:
+                return m
+        return None
+
+    need_hub = True
     admin = None
-    if need_hub:
-        from services.sub2api_admin import Sub2APIAdmin
-        admin = Sub2APIAdmin(hub_url)
-        try:
-            await admin.login(hub_email, hub_password)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Hub 登录失败: {e}")
+    try:
+        admin = await _get_hub_admin()
+    except HTTPException as e:
+        need_hub = False
+        log.append({"action": "error", "group": "*", "error": f"Hub 未就绪: {e.detail}"})
 
     for acc in accounts_data:
         stored = next((a for a in stored_accounts if a["id"] == acc["id"]), {})
@@ -1171,29 +1183,30 @@ async def auto_sync():
                 continue
 
             group_name = g.get("name", "")
-
-            # 解析该分组可用的上游 Key（分组级 > 账号级 > access_token）
-            upstream_key = _resolve_upstream_key(stored, group_name)
-            if not upstream_key:
-                continue  # 无可用上游 key
-            # Cookie 无独立 key 且无分组密钥时不能用于上游调用
-            if (stored.get("credential_type") == "cookie" and not stored.get("upstream_key")
-                    and not _get_group_key(acc["id"], group_name)):
+            try:
+                upstream_key = _require_upstream_key(stored, group_name)
+            except ValueError as e:
+                no_key_count += 1
+                log.append({
+                    "action": "skipped",
+                    "group": group_name,
+                    "reason": str(e),
+                })
                 continue
 
-            existing = _find_mapping(acc["id"], group_name)
+            existing = find_in_mappings(acc["id"], group_name)
 
             if existing:
-                # 已存在，检查倍率是否变化
-                if abs(existing["last_ratio"] - ratio) > 0.0001 and need_hub:
+                if abs(float(existing.get("last_ratio") or 0) - float(ratio)) > 0.0001 and need_hub:
                     try:
-                        await admin._request(
-                            "PUT", f"/api/v1/admin/groups/{existing['hub_group_id']}",
-                            json={"rate_multiplier": ratio})
+                        await admin.update_group(
+                            existing["hub_group_id"], rate_multiplier=float(ratio)
+                        )
                         old_r = existing["last_ratio"]
-                        existing["last_ratio"] = ratio
-                        existing["last_sync"] = time.strftime("%Y-%m-%d %H:%M",
-                                                              time.localtime())
+                        existing["last_ratio"] = float(ratio)
+                        existing["last_sync"] = time.strftime(
+                            "%Y-%m-%d %H:%M", time.localtime()
+                        )
                         log.append({
                             "action": "update_ratio",
                             "group": group_name,
@@ -1211,75 +1224,79 @@ async def auto_sync():
                 else:
                     skip_count += 1
             else:
-                # Check if better than existing mapped ratio in same category
                 cat = _classify_group_category(group_name)
                 mapped_best = 999.0
-                for m in _load_mappings():
-                    if (m["upstream_account_id"] == acc["id"]
-                            and _classify_group_category(m["upstream_group_name"]) == cat):
-                        if m["last_ratio"] < mapped_best:
-                            mapped_best = m["last_ratio"]
-                is_upgrade = ratio < mapped_best
-                if not is_upgrade and mapped_best < 999:
-                    log.append({"action": "skipped", "group": group_name,
-                                "reason": f"{ratio}x >= {mapped_best}x"})
+                for m in mappings:
+                    if (m.get("upstream_account_id") == acc["id"]
+                            and _classify_group_category(m.get("upstream_group_name", "")) == cat):
+                        try:
+                            if float(m.get("last_ratio", 999)) < mapped_best:
+                                mapped_best = float(m["last_ratio"])
+                        except (TypeError, ValueError):
+                            pass
+                if mapped_best < 999 and float(ratio) >= mapped_best:
+                    log.append({
+                        "action": "skipped",
+                        "group": group_name,
+                        "reason": f"{ratio}x >= 同分类已映射最优 {mapped_best}x",
+                    })
                     skip_count += 1
                     continue
-                # New or better - create
-                if need_hub:
-                    try:
-                        platform = _group_to_platform(group_name, acc.get("platform", "newapi"))
-                        hub_gn = _hub_group_name(group_name)
-                        result = await admin.provision_upstream(
-                            account_name=f"{acc['name']}-{group_name}",
-                            base_url=acc["base_url"],
-                            api_key=upstream_key,
-                            platform=platform,
-                            group_name=hub_gn,
-                            group_rate=float(ratio),
-                        )
-                        mapping = {
-                            "id": str(uuid.uuid4())[:8],
-                            "upstream_account_id": acc["id"],
-                            "upstream_account_name": acc["name"],
-                            "upstream_group_name": group_name,
-                            "category": cat,
-                            "upstream_base_url": acc["base_url"],
-                            "platform": platform,
-                            "hub_group_id": result["group"]["id"],
-                            "hub_group_name": result["group"]["name"],
-                            "hub_account_id": result["account"]["id"],
-                            "hub_account_name": result["account"]["name"],
-                            "last_ratio": ratio,
-                            "last_sync": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
-                            "created_at": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
-                        }
-                        mappings = _load_mappings()
-                        mappings.append(mapping)
-                        _save_mappings(mappings)
-                        log.append({
-                            "action": "created",
-                            "group": group_name,
-                            "ratio": ratio,
-                            "hub_account": result["account"]["name"],
-                        })
-                        new_count += 1
-                    except Exception as e:
-                        log.append({
-                            "action": "error",
-                            "group": group_name,
-                            "error": str(e),
-                        })
-                        error_count += 1
-                else:
+
+                if not need_hub:
                     log.append({
                         "action": "skipped",
                         "group": group_name,
                         "reason": "Hub 未配置",
                     })
                     skip_count += 1
+                    continue
 
-    _save_mappings(_load_mappings())  # 确保 mapping 更新已持久化
+                try:
+                    platform = _group_to_platform(group_name, acc.get("platform", "newapi"))
+                    hub_gn = _hub_group_name(group_name)
+                    result = await admin.provision_upstream(
+                        account_name=f"{acc['name']}-{group_name}",
+                        base_url=acc["base_url"],
+                        api_key=upstream_key,
+                        platform=platform,
+                        group_name=hub_gn,
+                        group_rate=float(ratio),
+                    )
+                    now = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+                    mapping = {
+                        "id": str(uuid.uuid4())[:8],
+                        "upstream_account_id": acc["id"],
+                        "upstream_account_name": acc["name"],
+                        "upstream_group_name": group_name,
+                        "category": cat,
+                        "upstream_base_url": acc["base_url"],
+                        "platform": platform,
+                        "hub_group_id": result["group"]["id"],
+                        "hub_group_name": result["group"]["name"],
+                        "hub_account_id": result["account"]["id"],
+                        "hub_account_name": result["account"]["name"],
+                        "last_ratio": float(ratio),
+                        "last_sync": now,
+                        "created_at": now,
+                    }
+                    mappings.append(mapping)
+                    log.append({
+                        "action": "created",
+                        "group": group_name,
+                        "ratio": ratio,
+                        "hub_account": result["account"]["name"],
+                    })
+                    new_count += 1
+                except Exception as e:
+                    log.append({
+                        "action": "error",
+                        "group": group_name,
+                        "error": str(e),
+                    })
+                    error_count += 1
+
+    _save_mappings(mappings)
     return {
         "success": True,
         "data": {
@@ -1288,6 +1305,7 @@ async def auto_sync():
                 "updated": update_count,
                 "skipped": skip_count,
                 "errors": error_count,
+                "no_key": no_key_count,
             },
             "log": log,
         },
@@ -1352,9 +1370,9 @@ async def set_group_key(req: dict):
     return {"success": True, "message": "分组密钥已保存"}
 
 
-@router.delete("/group-keys/{account_id}/{group_name}")
+@router.delete("/group-keys/{account_id}/{group_name:path}")
 async def delete_group_key(account_id: str, group_name: str):
-    """删除一个分组的 API Key"""
+    """删除一个分组的 API Key（group_name 支持含 / 的路径）"""
     keys = _load_group_keys()
     key = f"{account_id}/{group_name}"
     if key in keys:
@@ -1363,12 +1381,69 @@ async def delete_group_key(account_id: str, group_name: str):
     return {"success": True, "message": "分组密钥已删除"}
 
 
+def _looks_like_api_key(key: str) -> bool:
+    """判断是否可作为上游 OpenAI-compatible API Key（拒绝 session/JWT/cookie）。"""
+    if not key:
+        return False
+    k = key.strip()
+    if len(k) < 8:
+        return False
+    low = k.lower()
+    if low.startswith("session="):
+        return False
+    if "session=" in low and ("=" in k and (";" in k or k.count("=") >= 1)):
+        # cookie 串
+        if not low.startswith("sk-"):
+            return False
+    if k.startswith("eyJ"):  # JWT
+        return False
+    if low.startswith("rt_"):  # refresh token
+        return False
+    if low.startswith("bearer "):
+        return False
+    # 明确接受 sk- / 较长 token；其余非 cookie/jwt 也允许（部分站自定义前缀）
+    if low.startswith("sk-"):
+        return True
+    # 纯字母数字下划线短横，长度足够，且不含空白与 cookie 分隔
+    if any(ch.isspace() for ch in k):
+        return False
+    if "=" in k and ";" in k:
+        return False
+    return len(k) >= 16
+
+
 def _resolve_upstream_key(account: dict, group_name: str) -> str:
-    """解析上游 Key：分组级 > 账号级 > access_token"""
-    gk = _get_group_key(account["id"], group_name)
-    if gk:
-        return gk
-    return account.get("upstream_key", "") or account.get("access_token", "")
+    """解析上游 Key：分组级 > 账号级 upstream_key > 可用的 access_token(sk-)。
+
+    绝不会把 session cookie / JWT 当作上游 Key。
+    """
+    if not account:
+        return ""
+    gk = _get_group_key(account.get("id", ""), group_name)
+    if _looks_like_api_key(gk):
+        return gk.strip()
+    uk = (account.get("upstream_key") or "").strip()
+    if _looks_like_api_key(uk):
+        return uk
+    # access_token 仅当它本身就是 API Key 时可用（如 user_api_key）
+    at = (account.get("access_token") or "").strip()
+    if account.get("credential_type") in ("user_api_key", "bearer", "token") and _looks_like_api_key(at):
+        return at
+    if _looks_like_api_key(at) and at.lower().startswith("sk-"):
+        return at
+    return ""
+
+
+def _require_upstream_key(account: dict, group_name: str) -> str:
+    """解析上游 Key；不可用时抛出可读错误。"""
+    key = _resolve_upstream_key(account, group_name)
+    if key:
+        return key
+    name = account.get("name") or account.get("id") or "渠道"
+    raise ValueError(
+        f"「{name} / {group_name}」缺少可用的上游 API Key（sk-…）。"
+        f"Cookie/JWT 不能用于 Sub2API 上游调用，请在扫描器设置分组密钥，或在渠道填写上游 Key。"
+    )
 
 
 _PLATFORM_KEYWORDS: list[tuple[str, str]] = [

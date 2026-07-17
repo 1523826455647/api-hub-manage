@@ -216,6 +216,11 @@
                         <label for="s_hub_password">管理员密码</label>
                         <input type="password" id="s_hub_password" placeholder="留空则沿用已保存" autocomplete="new-password">
                     </div>
+                    <div class="field form-full">
+                        <label for="s_hub_api_key">Admin API Key（推荐，可选）</label>
+                        <input type="password" id="s_hub_api_key" placeholder="留空则沿用 / 使用邮箱密码登录" autocomplete="off" spellcheck="false">
+                        <span class="hint">优先使用 x-api-key 鉴权；配置后无需每次邮箱密码登录。</span>
+                    </div>
                     <div class="field">
                         <label for="s_ultra_low_rate">超低价阈值（低于此倍率触发扫描）</label>
                         <input type="number" id="s_ultra_low_rate" placeholder="0.6" step="0.05" min="0.1" max="2" value="0.6">
@@ -935,11 +940,13 @@ function getCategoryTag(cat) {
         const act = btn.dataset.act;
         const id = btn.dataset.id;
         const mid = btn.dataset.mid;
+        const idx = btn.dataset.idx;
         if (act === 'delete' && id) return doDelete(id);
         if (act === 'refresh' && id) return doRefresh(id, btn);
         if (act === 'redeem' && id) return showRedeem(id);
         if (act === 'detail' && id) return showAccountDetail(id);
-        if (act === 'provision' && id !== undefined) return doProvision(Number(id));
+        if (act === 'provision' && idx !== undefined && idx !== '') return doProvision(Number(idx), false);
+        if (act === 'reprovision' && idx !== undefined && idx !== '') return doProvision(Number(idx), true);
         if (act === 'sync-ratio' && mid) return doSyncRatio(mid);
         if (act === 'set-group-key') {
             const aid = btn.dataset.aid; const gname = btn.dataset.gname;
@@ -1030,7 +1037,8 @@ function getCategoryTag(cat) {
         }
         setBusy(btn, true, '添加中…');
         try {
-            await api('POST', '/accounts', {
+            const upstreamKey = ($('#f_upstream_key')?.value || '').trim();
+            const created = await api('POST', '/accounts', {
                 name,
                 platform: $('#f_platform').value,
                 base_url,
@@ -1040,17 +1048,12 @@ function getCategoryTag(cat) {
                 username: $('#f_user')?.value || null,
                 password: $('#f_pass')?.value || null,
                 recharge_ratio: parseFloat($('#f_recharge_ratio').value) || 1.0,
+                upstream_key: upstreamKey || null,
             });
-            // Save upstream key and user_id if provided
-            const upstreamKey = ($('#f_upstream_key')?.value || '').trim();
+            // user_id 仍可单独补丁（登录成功后也可能已自动写入）
             const manualUserId = ($('#f_user_id_manual')?.value || '').trim();
-            if (upstreamKey || manualUserId) {
-                const accs = await api('GET', '/accounts');
-                const last = (accs.data || []).slice(-1);
-                if (last.length) {
-                    if (upstreamKey) await api('PATCH', `/accounts/${encodeURIComponent(last[0].id)}/upstream_key`, { upstream_key: upstreamKey });
-                    if (manualUserId) await api('PATCH', `/accounts/${encodeURIComponent(last[0].id)}/user_id`, { user_id: manualUserId });
-                }
+            if (manualUserId && created?.data?.id) {
+                await api('PATCH', `/accounts/${encodeURIComponent(created.data.id)}/user_id`, { user_id: manualUserId });
             }
             toast('渠道已添加');
             e.target.reset();
@@ -1096,6 +1099,7 @@ function getCategoryTag(cat) {
             if (data.hub_base_url) $('#s_hub_url').value = data.hub_base_url;
             if (data.hub_email) $('#s_hub_email').value = data.hub_email;
             if (data.hub_password_set) $('#s_hub_password').placeholder = '已配置（留空则沿用）';
+            if (data.hub_api_key_set) $('#s_hub_api_key').placeholder = '已配置 (' + (data.hub_api_key_masked || '****') + ')';
             if (data.ultra_low_rate != null) $('#s_ultra_low_rate').value = data.ultra_low_rate;
         } catch (e) {}
         renderRulesEditor();
@@ -1276,9 +1280,12 @@ function getCategoryTag(cat) {
                         ? `（原始 ${c.raw_ratio}x）` : '';
                     const gkKey = `${c.id}/${c.group_name}`;
                     const hasGroupKey = !!gkMap[gkKey];
+                    const hasAnyKey = hasGroupKey || !!c.has_upstream_key;
                     let keyHtml = hasGroupKey
-                        ? `<span style="color:var(--success);font-size:11px;cursor:pointer" title="点击更换密钥" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}">✓ 已设置</span>`
-                        : `<button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:3px 8px">设置密钥</button>`;
+                        ? `<span style="color:var(--success);font-size:11px;cursor:pointer" title="点击更换密钥" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}">✓ 分组密钥</span>`
+                        : (c.has_upstream_key
+                            ? `<span style="color:var(--success);font-size:11px" title="渠道级上游 Key 可用">✓ 渠道Key</span> <button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:2px 6px">改</button>`
+                            : `<button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:3px 8px;color:var(--danger)">⚠ 设置密钥</button>`);
                     let statusHtml = '';
                     if (c.mapped) {
                         if (c.ratio_changed) {
@@ -1286,6 +1293,8 @@ function getCategoryTag(cat) {
                         } else {
                             statusHtml = `<span style="color:var(--success);font-size:11px">✓ 已配置</span>`;
                         }
+                    } else if (!hasAnyKey) {
+                        statusHtml = `<span style="color:var(--danger);font-size:11px">缺上游Key</span>`;
                     } else if (c.beats_existing) {
                         statusHtml = `<span style="color:var(--primary);font-size:11px;font-weight:700">🏆 更低! (${c.existing_best_ratio}x→${c.ratio}x)</span>`;
                     } else {
@@ -1299,9 +1308,9 @@ function getCategoryTag(cat) {
                         if (c.ratio_changed) {
                             opHtml = `<button class="btn btn-ghost" type="button" data-act="sync-ratio" data-mid="${esc(c.mapping_id)}" style="font-size:11px;padding:4px 10px;color:var(--warning)">同步倍率</button>`;
                         }
-                        opHtml += `<button class="btn btn-ghost" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px">重新配置</button>`;
+                        opHtml += `<button class="btn btn-ghost" type="button" data-act="reprovision" data-idx="${i}" style="font-size:11px;padding:4px 10px">重新配置</button>`;
                     } else {
-                        opHtml = `<button class="btn btn-primary" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px">配置到此 Hub</button>`;
+                        opHtml = `<button class="btn btn-primary" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px" ${hasAnyKey ? '' : 'disabled title="请先设置上游 API Key"'}>配置到此 Hub</button>`;
                     }
                     const cat = classifyGroup(c.group_name);
                     h += `<tr>
@@ -1336,32 +1345,40 @@ function getCategoryTag(cat) {
     }
 
     async function batchProvision(cands) {
-        let ok = 0, skip = 0, fail = 0;
+        let ok = 0, skip = 0, fail = 0, nokey = 0;
         for (const c of cands) {
-            const btn = document.querySelector(`[data-idx="${cands.indexOf(c)}"]`);
+            if (!c.has_upstream_key && !(window.__groupKeys || {})[`${c.id}/${c.group_name}`]) {
+                nokey++; continue;
+            }
             try {
                 const r = await api('POST', '/scanner/provision', {
                     account_id: c.id, group_name: c.group_name, ratio: c.ratio
                 });
                 if (r.data?.status === 'skipped') { skip++; }
                 else { ok++; }
-            } catch(e) { fail++; toast(e.message, false); }
+            } catch(e) { fail++; toast(`${c.group_name}: ${e.message}`, false); }
         }
-        toast(`完成：${ok} 新增，${skip} 跳过（已存在），${fail} 失败`);
+        let msg = `完成：${ok} 新增，${skip} 跳过`;
+        if (nokey) msg += `，${nokey} 缺密钥`;
+        if (fail) msg += `，${fail} 失败`;
+        toast(msg, fail === 0);
         doScan();
         loadMappings();
     }
 
-    async function doProvision(idx) {
+    async function doProvision(idx, force = false) {
         const c = (window.__scanCandidates || [])[idx];
         if (!c) return;
-        if (!confirm(`将「${c.name} - ${c.group_name}」（${c.ratio}x）配置到 Hub？`)) return;
+        const action = force ? '重新配置' : '配置';
+        if (!confirm(`将「${c.name} - ${c.group_name}」（${c.ratio}x）${action}到 Hub？${force ? '\n（将新建上游账号并更新映射）' : ''}`)) return;
         try {
             const r = await api('POST', '/scanner/provision', {
-                account_id: c.id, group_name: c.group_name, ratio: c.ratio
+                account_id: c.id, group_name: c.group_name, ratio: c.ratio, force: !!force
             });
             if (r.data?.status === 'skipped') {
                 toast('该分组已配置，跳过');
+            } else if (r.data?.status === 'recreated') {
+                toast(`已重新配置：${r.data?.group?.name || 'OK'}`);
             } else {
                 toast(`已配置：${r.data?.group?.name || 'OK'}`);
             }
@@ -1624,15 +1641,20 @@ function getCategoryTag(cat) {
     // ========== hub settings ==========
     async function saveHubSettings() {
         try {
-            await api('POST', '/settings', {
+            const body = {
                 hub_base_url: $('#s_hub_url').value.trim(),
                 hub_email: $('#s_hub_email').value.trim(),
-                hub_password: $('#s_hub_password').value,
                 ultra_low_rate: parseFloat($('#s_ultra_low_rate').value) || 0.6,
-            });
+            };
+            const pwd = $('#s_hub_password').value;
+            const hkey = ($('#s_hub_api_key')?.value || '').trim();
+            if (pwd) body.hub_password = pwd;
+            if (hkey) body.hub_api_key = hkey;
+            await api('POST', '/settings', body);
             toast('Hub 配置已保存');
             $('#hubStatus').innerHTML = '<span style="color:var(--success)">✓ 已保存</span>';
             $('#s_hub_password').value = '';
+            if ($('#s_hub_api_key')) $('#s_hub_api_key').value = '';
             loadSettings();
         } catch(e) { toast(e.message, false); }
     }
