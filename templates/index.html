@@ -276,49 +276,8 @@
                 </div>
                 <div class="toolbar-actions">
                     <button class="btn btn-ghost" type="button" id="btnProbeRefresh">刷新列表</button>
-                    <button class="btn btn-primary" type="button" id="btnProbeRunAll">⚡ 全部探活</button>
-                </div>
-            </div>
-
-            <div class="form-card" style="margin-bottom:18px">
-                <h2 style="margin-bottom:8px;font-size:16px">添加探活目标</h2>
-                <p class="lead" style="margin-bottom:14px">请自行选择要测的渠道、分组，并填写模型名。需要可用的上游 sk- Key（Cookie 不能探活）。</p>
-                <div class="form-grid" id="probeForm">
-                    <div class="field">
-                        <label for="p_name">备注名称（可选）</label>
-                        <input type="text" id="p_name" placeholder="如：token101-claude-探活" maxlength="64" autocomplete="off">
-                    </div>
-                    <div class="field">
-                        <label for="p_account">渠道</label>
-                        <select id="p_account"></select>
-                    </div>
-                    <div class="field">
-                        <label for="p_group">分组</label>
-                        <select id="p_group">
-                            <option value="">（不指定 / 由 Key 绑定）</option>
-                        </select>
-                        <span class="hint">来自仪表盘缓存的分组列表；可先强制刷新仪表盘再选</span>
-                    </div>
-                    <div class="field">
-                        <label for="p_model">模型</label>
-                        <input type="text" id="p_model" placeholder="如 gpt-4o-mini / claude-sonnet-4-5" autocomplete="off" spellcheck="false">
-                    </div>
-                    <div class="field">
-                        <label for="p_prompt">探活 Prompt</label>
-                        <input type="text" id="p_prompt" value="ping" maxlength="200" autocomplete="off">
-                    </div>
-                    <div class="field">
-                        <label for="p_max_tokens">max_tokens</label>
-                        <input type="number" id="p_max_tokens" value="8" min="1" max="64">
-                    </div>
-                    <div class="field">
-                        <label for="p_timeout">超时（秒）</label>
-                        <input type="number" id="p_timeout" value="30" min="5" max="120">
-                    </div>
-                    <div class="form-full" style="display:flex;gap:8px;flex-wrap:wrap;padding-top:4px">
-                        <button class="btn btn-primary" type="button" id="btnProbeAdd">保存探活配置</button>
-                        <button class="btn btn-ghost" type="button" id="btnProbeOnce">仅测一次（不保存）</button>
-                    </div>
+                    <button class="btn btn-primary" type="button" id="btnProbeAddOpen">＋ 添加探活目标</button>
+                    <button class="btn btn-primary" type="button" id="btnProbeRunAll" style="background:var(--success)">⚡ 全部探活</button>
                 </div>
             </div>
 
@@ -327,7 +286,7 @@
                 <div class="empty">
                     <div class="empty-icon">🩺</div>
                     <h3>还没有探活目标</h3>
-                    <p>在上方添加渠道 + 分组 + 模型后，即可一键探活</p>
+                    <p>点击右上角「添加探活目标」配置渠道、分组与模型</p>
                 </div>
             </div>
         </section>
@@ -1977,54 +1936,129 @@ function getCategoryTag(cat) {
     }
 
     async function loadProbePage() {
-        await populateProbeAccountSelect();
-        fillProbeGroups();
+        const el = $('#probeList');
+        if (el) el.innerHTML = '<div class="loading-block"><span class="spin"></span> 加载探活列表…</div>';
+        // 尽量带上仪表盘缓存（用于分组下拉），失败不阻断列表
+        try {
+            if (!lastDashboard || !(lastDashboard.accounts && lastDashboard.accounts.length)) {
+                const { data } = await api('GET', '/dashboard', undefined, 15000);
+                lastDashboard = data;
+                window.__lastAccounts = data?.accounts || [];
+            }
+        } catch (_) { /* ignore */ }
         await loadProbeProfiles();
     }
 
-    async function populateProbeAccountSelect() {
-        const sel = $('#p_account');
-        if (!sel) return;
+    async function getProbeAccounts() {
         let accounts = (lastDashboard && lastDashboard.accounts) || window.__lastAccounts || [];
         if (!accounts.length) {
             try {
                 const { data } = await api('GET', '/accounts');
                 accounts = data || [];
-            } catch (e) { accounts = []; }
+            } catch (e) {
+                accounts = [];
+            }
         }
-        const cur = sel.value;
-        sel.innerHTML = accounts.map(a =>
-            `<option value="${esc(a.id)}">${esc(a.name)} · ${esc(a.platform || '')}</option>`
-        ).join('') || '<option value="">暂无渠道</option>';
-        if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+        return accounts;
     }
 
-    function fillProbeGroups() {
+    function fillProbeGroupsInModal() {
         const gsel = $('#p_group');
         const accId = $('#p_account')?.value;
         if (!gsel) return;
         const accounts = (lastDashboard && lastDashboard.accounts) || window.__lastAccounts || [];
         const acc = accounts.find(a => a.id === accId);
         const groups = (acc && acc.groups) || [];
-        const cur = gsel.value;
         let html = '<option value="">（不指定 / 由 Key 绑定）</option>';
         groups.forEach(g => {
             const name = g.name || '';
             const ratio = g.ratio != null ? ` · ${g.ratio}x` : '';
             html += `<option value="${esc(name)}">${esc(name)}${esc(ratio)}</option>`;
         });
+        if (!groups.length) {
+            html += '<option value="" disabled>暂无分组缓存，可先回仪表盘点「强制」</option>';
+        }
         gsel.innerHTML = html;
-        if (cur && [...gsel.options].some(o => o.value === cur)) gsel.value = cur;
+    }
+
+    async function openProbeAddModal() {
+        const accounts = await getProbeAccounts();
+        if (!accounts.length) {
+            toast('请先添加渠道账号', false);
+            return;
+        }
+        const accOpts = accounts.map(a =>
+            `<option value="${esc(a.id)}">${esc(a.name)} · ${esc(a.platform || '')}</option>`
+        ).join('');
+        openModal('添加探活目标', `
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+                选择渠道、分组并填写模型。需要可用的上游 <code>sk-</code> Key（Cookie 不能探活）。
+            </p>
+            <div class="form-grid" style="gap:12px">
+                <div class="field form-full">
+                    <label for="p_name">备注名称（可选）</label>
+                    <input type="text" id="p_name" placeholder="如：token101-claude-探活" maxlength="64" autocomplete="off">
+                </div>
+                <div class="field">
+                    <label for="p_account">渠道</label>
+                    <select id="p_account">${accOpts}</select>
+                </div>
+                <div class="field">
+                    <label for="p_group">分组</label>
+                    <select id="p_group"><option value="">（不指定 / 由 Key 绑定）</option></select>
+                </div>
+                <div class="field form-full">
+                    <label for="p_model">模型</label>
+                    <input type="text" id="p_model" placeholder="如 gpt-4o-mini / claude-sonnet-4-5" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="field">
+                    <label for="p_prompt">探活 Prompt</label>
+                    <input type="text" id="p_prompt" value="ping" maxlength="200" autocomplete="off">
+                </div>
+                <div class="field">
+                    <label for="p_max_tokens">max_tokens</label>
+                    <input type="number" id="p_max_tokens" value="8" min="1" max="64">
+                </div>
+                <div class="field">
+                    <label for="p_timeout">超时（秒）</label>
+                    <input type="number" id="p_timeout" value="30" min="5" max="120">
+                </div>
+                <div class="form-full" style="display:flex;gap:8px;flex-wrap:wrap;padding-top:4px">
+                    <button class="btn btn-primary" type="button" id="btnProbeAdd">保存并添加</button>
+                    <button class="btn btn-ghost" type="button" id="btnProbeOnce">仅测一次（不保存）</button>
+                </div>
+                <div id="p_form_msg" class="form-full" style="font-size:12px;color:var(--text-muted)"></div>
+            </div>
+        `);
+        fillProbeGroupsInModal();
+        $('#p_account')?.addEventListener('change', fillProbeGroupsInModal);
+        $('#btnProbeAdd')?.addEventListener('click', addProbeProfile);
+        $('#btnProbeOnce')?.addEventListener('click', runProbeOnce);
+        setTimeout(() => $('#p_model')?.focus(), 50);
     }
 
     async function loadProbeProfiles() {
         const el = $('#probeList');
         try {
             const { data } = await api('GET', '/probe/profiles');
-            probeProfiles = data || [];
+            probeProfiles = Array.isArray(data) ? data : [];
             renderProbeProfiles(probeProfiles);
         } catch (e) {
-            if (el) el.innerHTML = `<div class="empty" style="color:var(--danger)"><h3>加载失败</h3><p>${esc(e.message)}</p></div>`;
+            const msg = e?.message || String(e);
+            // 旧服务进程没有探活接口时给出明确指引
+            const hint = /404|Not Found|探活|probe/i.test(msg)
+                ? '当前服务可能未重启到最新代码。请关闭旧窗口后重新运行 python main.py，再 Ctrl+Shift+R 刷新页面。'
+                : '请确认服务已启动（http://localhost:8899），并重启到最新版本。';
+            if (el) {
+                el.innerHTML = `<div class="empty" style="color:var(--danger)">
+                    <div class="empty-icon">⚠</div>
+                    <h3>加载失败</h3>
+                    <p>${esc(msg)}</p>
+                    <p style="margin-top:8px;color:var(--text-muted);font-size:12px">${esc(hint)}</p>
+                    <button class="btn btn-primary" type="button" id="btnProbeRetry" style="margin-top:12px">重试</button>
+                </div>`;
+                $('#btnProbeRetry')?.addEventListener('click', loadProbePage);
+            }
         }
     }
 
@@ -2068,8 +2102,14 @@ function getCategoryTag(cat) {
         const sum = $('#probeSummary');
         if (!el) return;
         if (!list.length) {
-            el.innerHTML = `<div class="empty"><div class="empty-icon">🩺</div><h3>还没有探活目标</h3><p>在上方添加渠道 + 分组 + 模型后，即可一键探活</p></div>`;
+            el.innerHTML = `<div class="empty">
+                <div class="empty-icon">🩺</div>
+                <h3>还没有探活目标</h3>
+                <p>点击右上角「添加探活目标」，填写渠道 / 分组 / 模型后保存</p>
+                <button class="btn btn-primary" type="button" id="btnProbeAddOpenEmpty" style="margin-top:12px">＋ 添加探活目标</button>
+            </div>`;
             if (sum) sum.style.display = 'none';
+            $('#btnProbeAddOpenEmpty')?.addEventListener('click', openProbeAddModal);
             return;
         }
         // summary from last results
@@ -2124,53 +2164,80 @@ function getCategoryTag(cat) {
         }).join('');
     }
 
-    async function addProbeProfile() {
-        const account_id = $('#p_account')?.value;
+    function readProbeForm() {
+        const account_id = $('#p_account')?.value || '';
         const model = ($('#p_model')?.value || '').trim();
-        if (!account_id) return toast('请选择渠道', false);
-        if (!model) return toast('请填写模型名', false);
+        return {
+            name: ($('#p_name')?.value || '').trim(),
+            account_id,
+            group_name: $('#p_group')?.value || '',
+            model,
+            prompt: ($('#p_prompt')?.value || 'ping').trim() || 'ping',
+            max_tokens: parseInt($('#p_max_tokens')?.value, 10) || 8,
+            timeout: parseInt($('#p_timeout')?.value, 10) || 30,
+            account_label: $('#p_account')?.selectedOptions?.[0]?.textContent || '',
+        };
+    }
+
+    async function addProbeProfile() {
+        const form = readProbeForm();
+        if (!form.account_id) return toast('请选择渠道', false);
+        if (!form.model) return toast('请填写模型名', false);
+        const btn = $('#btnProbeAdd');
+        setBusy(btn, true, '保存中…');
         try {
             await api('POST', '/probe/profiles', {
-                name: ($('#p_name')?.value || '').trim(),
-                account_id,
-                group_name: $('#p_group')?.value || '',
-                model,
-                prompt: ($('#p_prompt')?.value || 'ping').trim() || 'ping',
-                max_tokens: parseInt($('#p_max_tokens')?.value, 10) || 8,
-                timeout: parseInt($('#p_timeout')?.value, 10) || 30,
+                name: form.name,
+                account_id: form.account_id,
+                group_name: form.group_name,
+                model: form.model,
+                prompt: form.prompt,
+                max_tokens: form.max_tokens,
+                timeout: form.timeout,
                 enabled: true,
             });
-            toast('探活配置已保存');
-            if ($('#p_name')) $('#p_name').value = '';
+            toast('探活目标已添加');
+            closeModal();
             await loadProbeProfiles();
-        } catch (e) { toast(e.message, false); }
+        } catch (e) {
+            toast(e.message, false);
+            const msg = $('#p_form_msg');
+            if (msg) msg.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+        } finally {
+            setBusy(btn, false, null, '保存并添加');
+        }
     }
 
     async function runProbeOnce() {
-        const account_id = $('#p_account')?.value;
-        const model = ($('#p_model')?.value || '').trim();
-        if (!account_id) return toast('请选择渠道', false);
-        if (!model) return toast('请填写模型名', false);
+        const form = readProbeForm();
+        if (!form.account_id) return toast('请选择渠道', false);
+        if (!form.model) return toast('请填写模型名', false);
         const btn = $('#btnProbeOnce');
         setBusy(btn, true, '探活中…');
         try {
             const { data } = await api('POST', '/probe/run', {
-                account_id,
-                group_name: $('#p_group')?.value || '',
-                model,
-                prompt: ($('#p_prompt')?.value || 'ping').trim() || 'ping',
-                max_tokens: parseInt($('#p_max_tokens')?.value, 10) || 8,
-                timeout: parseInt($('#p_timeout')?.value, 10) || 30,
+                account_id: form.account_id,
+                group_name: form.group_name,
+                model: form.model,
+                prompt: form.prompt,
+                max_tokens: form.max_tokens,
+                timeout: form.timeout,
             }, 120000);
+            // 用结果卡替换弹窗内容
             openModal('探活结果', renderProbeResultCard(data, {
-                name: '即时探活',
-                model,
-                group_name: $('#p_group')?.value || '',
-                account_name: $('#p_account')?.selectedOptions?.[0]?.textContent || '',
+                name: form.name || '即时探活',
+                model: form.model,
+                group_name: form.group_name,
+                account_name: form.account_label,
             }));
             toast(data.ok ? `探活成功 · ${data.latency_ms}ms` : `探活失败 · ${data.status}`, !!data.ok);
-        } catch (e) { toast(e.message, false); }
-        finally { setBusy(btn, false, null, '仅测一次（不保存）'); }
+        } catch (e) {
+            toast(e.message, false);
+            const msg = $('#p_form_msg');
+            if (msg) msg.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+        } finally {
+            setBusy(btn, false, null, '仅测一次（不保存）');
+        }
     }
 
     async function runProbeProfile(pid) {
@@ -2281,9 +2348,7 @@ function getCategoryTag(cat) {
         $('#btnAutoSync')?.addEventListener('click', doAutoSync);
         $('#btnProbeRefresh')?.addEventListener('click', loadProbePage);
         $('#btnProbeRunAll')?.addEventListener('click', runAllProbes);
-        $('#btnProbeAdd')?.addEventListener('click', addProbeProfile);
-        $('#btnProbeOnce')?.addEventListener('click', runProbeOnce);
-        $('#p_account')?.addEventListener('change', fillProbeGroups);
+        $('#btnProbeAddOpen')?.addEventListener('click', openProbeAddModal);
         $('#btnBackDash')?.addEventListener('click', () => switchPage('dashboard'));
         $('#modalClose')?.addEventListener('click', closeModal);
         $('#modal')?.addEventListener('click', e => { if (e.target === $('#modal')) closeModal(); });
