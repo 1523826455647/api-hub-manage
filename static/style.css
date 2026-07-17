@@ -1732,39 +1732,47 @@ html[data-theme="dark"] .tag-other {
 }
 
 .probe-history-main {
-  flex: 1;
-  min-width: 220px;
+  flex: 0 0 auto; /* 不随行宽被拉长，保持正方形格子紧凑 */
+  width: max-content;
+  max-width: 100%;
 }
 
 .probe-history-grid {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px; /* 行间距尽量紧密 */
+  width: max-content;
 }
 
 .probe-history-row {
-  display: grid;
-  grid-template-columns: repeat(10, 1fr);
-  gap: 4px;
+  display: flex; /* 固定方块，不用 1fr 拉成矩形 */
+  flex-direction: row;
+  gap: 3px; /* 列间距尽量紧密 */
+  width: max-content;
 }
 
+/* 固定正方形色块 */
 .probe-cell {
-  display: inline-block;
-  width: 100%;
-  aspect-ratio: 1;
-  min-width: 14px;
-  min-height: 14px;
-  max-width: 22px;
-  max-height: 22px;
-  border-radius: 3px;
+  display: block;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  max-width: 16px;
+  max-height: 16px;
+  flex: 0 0 16px;
+  aspect-ratio: 1 / 1;
+  border-radius: 2px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   cursor: default;
+  padding: 0;
   transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
 
 .probe-cell:hover {
-  transform: scale(1.25);
+  transform: scale(1.35);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
   z-index: 2;
   position: relative;
@@ -1799,7 +1807,7 @@ html[data-theme="dark"] .tag-other {
 .probe-history-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px 14px;
+  gap: 8px 12px;
   margin-top: 8px;
   font-size: 11px;
   color: var(--text-muted);
@@ -1808,7 +1816,7 @@ html[data-theme="dark"] .tag-other {
 .probe-history-legend span {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 
 .probe-history-legend .probe-cell {
@@ -1818,6 +1826,7 @@ html[data-theme="dark"] .tag-other {
   min-height: 12px;
   max-width: 12px;
   max-height: 12px;
+  flex: 0 0 12px;
   cursor: default;
 }
 
