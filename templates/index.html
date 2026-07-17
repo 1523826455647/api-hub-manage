@@ -247,7 +247,7 @@
             <div class="page-toolbar">
                 <div>
                     <h1>低价扫描器</h1>
-                    <div class="sub">扫描 → 自动建上游 → 倍率变化自动同步</div>
+                    <div class="sub">扫描低价 → 筛分勾选 → 按需配置到 Sub2API（不会强制全量上传）</div>
                 </div>
                 <div class="toolbar-actions">
                     <span style="font-size:12px;color:var(--text-muted)">阈值:</span>
@@ -1329,93 +1329,314 @@ function getCategoryTag(cat) {
         loadGroupKeys();
     }
 
+    // 扫描结果筛分 + 多选按需同步
+    let scanFilter = {
+        q: '',
+        platform: '',
+        category: '',
+        status: '',   // mapped | unmapped | changed | nokey | best | upgrade
+        sort: 'ratio', // ratio | name | category
+    };
+    let scanSelected = new Set(); // keys: accountId||group_name
+    let scanThreshold = 0.6;
+
+    function scanRowKey(c) {
+        return `${c.id}||${c.group_name}`;
+    }
+
+    function enrichScanCandidate(c, i) {
+        const gkMap = window.__groupKeys || {};
+        const hasGroupKey = !!gkMap[`${c.id}/${c.group_name}`];
+        const hasAnyKey = hasGroupKey || !!c.has_upstream_key;
+        const cat = classifyGroup(c.group_name);
+        return {
+            ...c,
+            _idx: i,
+            _cat: cat,
+            _hasGroupKey: hasGroupKey,
+            _hasAnyKey: hasAnyKey,
+        };
+    }
+
+    function getFilteredScanCandidates() {
+        const all = window.__scanCandidates || [];
+        const q = (scanFilter.q || '').trim().toLowerCase();
+        let list = all.filter(c => {
+            if (scanFilter.platform && c.platform !== scanFilter.platform) return false;
+            if (scanFilter.category && c._cat !== scanFilter.category) return false;
+            if (scanFilter.status === 'mapped' && !c.mapped) return false;
+            if (scanFilter.status === 'unmapped' && c.mapped) return false;
+            if (scanFilter.status === 'changed' && !(c.mapped && c.ratio_changed)) return false;
+            if (scanFilter.status === 'nokey' && c._hasAnyKey) return false;
+            if (scanFilter.status === 'best' && !c.is_best_in_category) return false;
+            if (scanFilter.status === 'upgrade' && !c.beats_existing) return false;
+            if (q) {
+                const blob = `${c.name || ''} ${c.group_name || ''} ${c.platform || ''} ${c._cat || ''}`.toLowerCase();
+                if (!blob.includes(q)) return false;
+            }
+            return true;
+        });
+        if (scanFilter.sort === 'name') {
+            list = list.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)) || (a.ratio - b.ratio));
+        } else if (scanFilter.sort === 'category') {
+            list = list.slice().sort((a, b) => String(a._cat).localeCompare(String(b._cat)) || (a.ratio - b.ratio));
+        } else {
+            list = list.slice().sort((a, b) => (a.ratio ?? 99) - (b.ratio ?? 99));
+        }
+        return list;
+    }
+
+    function scanStatusKind(c) {
+        if (c.mapped && c.ratio_changed) return 'changed';
+        if (c.mapped) return 'mapped';
+        if (!c._hasAnyKey) return 'nokey';
+        if (c.beats_existing) return 'upgrade';
+        if (c.is_best_in_category) return 'best';
+        return 'unmapped';
+    }
+
+    function renderScanResults() {
+        const el = $('#scanContent');
+        if (!el) return;
+        const all = window.__scanCandidates || [];
+        const filtered = getFilteredScanCandidates();
+        const threshold = scanThreshold;
+
+        // 统计分桶
+        const stats = {
+            total: all.length,
+            unmapped: all.filter(c => !c.mapped).length,
+            mapped: all.filter(c => c.mapped).length,
+            changed: all.filter(c => c.mapped && c.ratio_changed).length,
+            nokey: all.filter(c => !c._hasAnyKey).length,
+            upgrade: all.filter(c => c.beats_existing).length,
+        };
+        const platforms = [...new Set(all.map(c => c.platform).filter(Boolean))];
+        const categories = [...new Set(all.map(c => c._cat).filter(Boolean))];
+
+        let h = `<div class="scan-toolbar">
+            <div class="section-title" style="margin-bottom:0">扫描结果
+                <span style="color:var(--text-muted);font-weight:600;font-size:12px">
+                    显示 ${filtered.length}/${all.length} · 阈值 ≤ ${esc(threshold)}x
+                </span>
+            </div>
+            <div class="scan-actions">
+                <button class="btn btn-primary" type="button" id="btnProvSelected">配置所选</button>
+                <button class="btn btn-ghost" type="button" id="btnSyncSelected">同步所选倍率</button>
+                <button class="btn btn-ghost" type="button" id="btnProvVisibleUnmapped">配置可见未映射</button>
+            </div>
+        </div>`;
+
+        // 分桶标签
+        h += `<div class="scan-chips">
+            <button type="button" class="scan-chip ${!scanFilter.status ? 'active' : ''}" data-sf-status="">全部 <b>${stats.total}</b></button>
+            <button type="button" class="scan-chip ${scanFilter.status==='unmapped'?'active':''}" data-sf-status="unmapped">未配置 <b>${stats.unmapped}</b></button>
+            <button type="button" class="scan-chip ${scanFilter.status==='mapped'?'active':''}" data-sf-status="mapped">已配置 <b>${stats.mapped}</b></button>
+            <button type="button" class="scan-chip warn ${scanFilter.status==='changed'?'active':''}" data-sf-status="changed">倍率已变 <b>${stats.changed}</b></button>
+            <button type="button" class="scan-chip danger ${scanFilter.status==='nokey'?'active':''}" data-sf-status="nokey">缺密钥 <b>${stats.nokey}</b></button>
+            <button type="button" class="scan-chip primary ${scanFilter.status==='upgrade'?'active':''}" data-sf-status="upgrade">更低价 <b>${stats.upgrade}</b></button>
+            <button type="button" class="scan-chip ok ${scanFilter.status==='best'?'active':''}" data-sf-status="best">分类最优</button>
+        </div>`;
+
+        // 筛分控件
+        h += `<div class="scan-filters">
+            <input type="search" id="sfQ" placeholder="搜索渠道 / 分组 / 分类…" value="${esc(scanFilter.q)}" autocomplete="off">
+            <select id="sfPlatform">
+                <option value="">全部平台</option>
+                ${platforms.map(p => `<option value="${esc(p)}" ${scanFilter.platform===p?'selected':''}>${esc(p)}</option>`).join('')}
+            </select>
+            <select id="sfCategory">
+                <option value="">全部分类</option>
+                ${categories.map(p => `<option value="${esc(p)}" ${scanFilter.category===p?'selected':''}>${esc(p)}</option>`).join('')}
+            </select>
+            <select id="sfSort">
+                <option value="ratio" ${scanFilter.sort==='ratio'?'selected':''}>按倍率升序</option>
+                <option value="category" ${scanFilter.sort==='category'?'selected':''}>按分类</option>
+                <option value="name" ${scanFilter.sort==='name'?'selected':''}>按渠道名</option>
+            </select>
+            <span class="scan-selected-hint">已选 <b id="sfSelCount">${scanSelected.size}</b> 项</span>
+        </div>`;
+
+        if (!all.length) {
+            h += '<div class="empty"><div class="empty-icon">🎉</div><h3>没有发现超低价分组</h3></div>';
+            el.innerHTML = h;
+            bindScanFilterUI();
+            return;
+        }
+        if (!filtered.length) {
+            h += '<div class="empty"><div class="empty-icon">🔍</div><h3>无匹配结果</h3><p>试试调整筛分条件</p></div>';
+            el.innerHTML = h;
+            bindScanFilterUI();
+            return;
+        }
+
+        h += `<div class="ratio-table-wrap"><table class="ratio-tbl scan-tbl"><thead><tr>
+            <th style="width:36px"><input type="checkbox" id="sfCheckAll" title="全选当前可见"></th>
+            <th>渠道</th><th>平台</th><th>分类</th><th>分组名</th><th>有效倍率</th><th>Key</th><th>状态</th><th>操作</th>
+        </tr></thead><tbody>`;
+
+        filtered.forEach((c) => {
+            const i = c._idx;
+            const key = scanRowKey(c);
+            const checked = scanSelected.has(key) ? 'checked' : '';
+            const rawNote = (c.raw_ratio != null && c.raw_ratio !== c.ratio)
+                ? `（原始 ${c.raw_ratio}x）` : '';
+            const kind = scanStatusKind(c);
+            let keyHtml = c._hasGroupKey
+                ? `<span style="color:var(--success);font-size:11px;cursor:pointer" title="点击更换密钥" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}">✓ 分组密钥</span>`
+                : (c.has_upstream_key
+                    ? `<span style="color:var(--success);font-size:11px" title="渠道级上游 Key 可用">✓ 渠道Key</span> <button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:2px 6px">改</button>`
+                    : `<button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:3px 8px;color:var(--danger)">⚠ 设置密钥</button>`);
+
+            let statusHtml = '';
+            if (kind === 'changed') statusHtml = `<span class="scan-badge warn">⚠ 倍率已变</span>`;
+            else if (kind === 'mapped') statusHtml = `<span class="scan-badge ok">✓ 已配置</span>`;
+            else if (kind === 'nokey') statusHtml = `<span class="scan-badge danger">缺上游Key</span>`;
+            else if (kind === 'upgrade') statusHtml = `<span class="scan-badge primary">🏆 更低 ${c.existing_best_ratio}x→${c.ratio}x</span>`;
+            else if (kind === 'best') statusHtml = `<span class="scan-badge ok">最优 · 未配置</span>`;
+            else statusHtml = `<span class="scan-badge">未配置</span>`;
+
+            let opHtml = '';
+            if (c.mapped) {
+                if (c.ratio_changed) {
+                    opHtml += `<button class="btn btn-ghost" type="button" data-act="sync-ratio" data-mid="${esc(c.mapping_id)}" style="font-size:11px;padding:4px 10px;color:var(--warning)">同步倍率</button>`;
+                }
+                opHtml += `<button class="btn btn-ghost" type="button" data-act="reprovision" data-idx="${i}" style="font-size:11px;padding:4px 10px">重新配置</button>`;
+            } else {
+                opHtml = `<button class="btn btn-primary" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px" ${c._hasAnyKey ? '' : 'disabled title="请先设置上游 API Key"'}>配置到 Hub</button>`;
+            }
+
+            h += `<tr class="scan-row kind-${kind}" data-skey="${esc(key)}">
+                <td><input type="checkbox" class="sf-row-check" data-skey="${esc(key)}" ${checked}></td>
+                <td class="channel-col">${esc(c.name)}</td>
+                <td><span class="ch-tag tag-${esc(c.platform)}">${esc(c.platform)}</span></td>
+                <td>${getCategoryTag(c._cat)}</td>
+                <td style="font-weight:600">${esc(c.group_name)}</td>
+                <td class="best">${c.ratio}x <span style="font-size:10px;color:var(--text-muted)">${rawNote}</span></td>
+                <td>${keyHtml}</td>
+                <td>${statusHtml}</td>
+                <td>${opHtml}</td>
+            </tr>`;
+        });
+        h += '</tbody></table></div>';
+        h += `<div class="scan-hint">提示：勾选需要同步的项后点「配置所选」；不会自动上传全部结果。也可用上方筛分只看某一类。</div>`;
+
+        el.innerHTML = h;
+        bindScanFilterUI();
+        // 全选可见
+        const allBox = $('#sfCheckAll');
+        if (allBox) {
+            const keys = filtered.map(scanRowKey);
+            allBox.checked = keys.length > 0 && keys.every(k => scanSelected.has(k));
+            allBox.indeterminate = keys.some(k => scanSelected.has(k)) && !allBox.checked;
+        }
+        updateScanSelectedCount();
+    }
+
+    function updateScanSelectedCount() {
+        const n = $('#sfSelCount');
+        if (n) n.textContent = String(scanSelected.size);
+    }
+
+    function bindScanFilterUI() {
+        const el = $('#scanContent');
+        if (!el) return;
+
+        el.querySelectorAll('[data-sf-status]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                scanFilter.status = btn.getAttribute('data-sf-status') || '';
+                renderScanResults();
+            });
+        });
+
+        const q = $('#sfQ');
+        if (q) {
+            let t;
+            q.addEventListener('input', () => {
+                clearTimeout(t);
+                t = setTimeout(() => {
+                    scanFilter.q = q.value || '';
+                    renderScanResults();
+                }, 120);
+            });
+        }
+        $('#sfPlatform')?.addEventListener('change', e => {
+            scanFilter.platform = e.target.value || '';
+            renderScanResults();
+        });
+        $('#sfCategory')?.addEventListener('change', e => {
+            scanFilter.category = e.target.value || '';
+            renderScanResults();
+        });
+        $('#sfSort')?.addEventListener('change', e => {
+            scanFilter.sort = e.target.value || 'ratio';
+            renderScanResults();
+        });
+
+        $('#sfCheckAll')?.addEventListener('change', e => {
+            const filtered = getFilteredScanCandidates();
+            if (e.target.checked) filtered.forEach(c => scanSelected.add(scanRowKey(c)));
+            else filtered.forEach(c => scanSelected.delete(scanRowKey(c)));
+            renderScanResults();
+        });
+
+        el.querySelectorAll('.sf-row-check').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const k = cb.getAttribute('data-skey');
+                if (!k) return;
+                if (cb.checked) scanSelected.add(k);
+                else scanSelected.delete(k);
+                updateScanSelectedCount();
+                const allBox = $('#sfCheckAll');
+                if (allBox) {
+                    const keys = getFilteredScanCandidates().map(scanRowKey);
+                    allBox.checked = keys.length > 0 && keys.every(x => scanSelected.has(x));
+                    allBox.indeterminate = keys.some(x => scanSelected.has(x)) && !allBox.checked;
+                }
+            });
+        });
+
+        $('#btnProvSelected')?.addEventListener('click', async () => {
+            const selected = (window.__scanCandidates || []).filter(c => scanSelected.has(scanRowKey(c)));
+            if (!selected.length) return toast('请先勾选要配置的分组', false);
+            if (!confirm(`将配置所选 ${selected.length} 个分组到 Hub？\n已映射的会跳过（可用单项「重新配置」强制）。`)) return;
+            await batchProvision(selected);
+        });
+        $('#btnSyncSelected')?.addEventListener('click', async () => {
+            const selected = (window.__scanCandidates || []).filter(c => scanSelected.has(scanRowKey(c)) && c.mapped && c.mapping_id);
+            if (!selected.length) return toast('所选中没有可同步倍率的已映射项', false);
+            if (!confirm(`同步所选 ${selected.length} 条映射的倍率到 Hub？`)) return;
+            await batchSyncRatio(selected);
+        });
+        $('#btnProvVisibleUnmapped')?.addEventListener('click', async () => {
+            const fresh = getFilteredScanCandidates().filter(c => !c.mapped);
+            if (!fresh.length) return toast('当前筛分下没有未映射项', false);
+            if (!confirm(`仅配置当前可见的 ${fresh.length} 个未映射分组？`)) return;
+            await batchProvision(fresh);
+        });
+    }
+
     async function doScan() {
         const el = $('#scanContent');
         el.innerHTML = '<div class="loading-block"><span class="spin"></span> 扫描中…</div>';
         try {
+            await loadGroupKeys();
             await api('GET', '/dashboard?force=true');
+            // 刷新 lastDashboard 以便分组分类一致
+            try {
+                const dash = await api('GET', '/dashboard');
+                lastDashboard = dash.data;
+                window.__lastAccounts = dash.data?.accounts || [];
+            } catch (_) {}
             const { data } = await api('POST', '/scanner/scan');
-            const candidates = data.candidates || [];
-            const threshold = data.threshold || 0.6;
+            const candidates = (data.candidates || []).map(enrichScanCandidate);
+            scanThreshold = data.threshold || 0.6;
             window.__scanCandidates = candidates;
-
-            let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
-                <div class="section-title" style="margin-bottom:0">扫描结果 <span style="color:var(--text-muted);font-weight:600;font-size:12px">${candidates.length} 个低价分组（≤ ${threshold}x）</span></div>
-                <div style="display:flex;gap:8px">
-                    <button class="btn btn-ghost" type="button" id="btnProvNew">仅配置未映射</button>
-                    <button class="btn btn-primary" type="button" id="btnProvAll">一键全部配置</button>
-                </div>
-            </div>`;
-
-            if (!candidates.length) {
-                h += '<div class="empty"><div class="empty-icon">🎉</div><h3>没有发现超低价分组</h3></div>';
-            } else {
-                h += '<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr><th>渠道</th><th>平台</th><th>分类</th><th>分组名</th><th>有效倍率</th><th>Key</th><th>状态</th><th>操作</th></tr></thead><tbody>';
-                const gkMap = window.__groupKeys || {};
-                candidates.forEach((c, i) => {
-                    const rawNote = (c.raw_ratio != null && c.raw_ratio !== c.ratio)
-                        ? `（原始 ${c.raw_ratio}x）` : '';
-                    const gkKey = `${c.id}/${c.group_name}`;
-                    const hasGroupKey = !!gkMap[gkKey];
-                    const hasAnyKey = hasGroupKey || !!c.has_upstream_key;
-                    let keyHtml = hasGroupKey
-                        ? `<span style="color:var(--success);font-size:11px;cursor:pointer" title="点击更换密钥" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}">✓ 分组密钥</span>`
-                        : (c.has_upstream_key
-                            ? `<span style="color:var(--success);font-size:11px" title="渠道级上游 Key 可用">✓ 渠道Key</span> <button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:2px 6px">改</button>`
-                            : `<button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(c.id)}" data-gname="${esc(c.group_name)}" style="font-size:10px;padding:3px 8px;color:var(--danger)">⚠ 设置密钥</button>`);
-                    let statusHtml = '';
-                    if (c.mapped) {
-                        if (c.ratio_changed) {
-                            statusHtml = `<span style="color:var(--warning);font-size:11px">⚠ 倍率已变</span>`;
-                        } else {
-                            statusHtml = `<span style="color:var(--success);font-size:11px">✓ 已配置</span>`;
-                        }
-                    } else if (!hasAnyKey) {
-                        statusHtml = `<span style="color:var(--danger);font-size:11px">缺上游Key</span>`;
-                    } else if (c.beats_existing) {
-                        statusHtml = `<span style="color:var(--primary);font-size:11px;font-weight:700">🏆 更低! (${c.existing_best_ratio}x→${c.ratio}x)</span>`;
-                    } else {
-                        statusHtml = `<span style="color:var(--text-muted);font-size:11px">未配置</span>`;
-                    }
-                    if (c.is_best_in_category && !c.mapped && !c.beats_existing) {
-                        statusHtml += ` <span style="color:var(--success);font-size:10px">最优</span>`;
-                    }
-                    let opHtml = '';
-                    if (c.mapped) {
-                        if (c.ratio_changed) {
-                            opHtml = `<button class="btn btn-ghost" type="button" data-act="sync-ratio" data-mid="${esc(c.mapping_id)}" style="font-size:11px;padding:4px 10px;color:var(--warning)">同步倍率</button>`;
-                        }
-                        opHtml += `<button class="btn btn-ghost" type="button" data-act="reprovision" data-idx="${i}" style="font-size:11px;padding:4px 10px">重新配置</button>`;
-                    } else {
-                        opHtml = `<button class="btn btn-primary" type="button" data-act="provision" data-idx="${i}" style="font-size:11px;padding:4px 10px" ${hasAnyKey ? '' : 'disabled title="请先设置上游 API Key"'}>配置到此 Hub</button>`;
-                    }
-                    const cat = classifyGroup(c.group_name);
-                    h += `<tr>
-                        <td class="channel-col">${esc(c.name)}</td>
-                        <td><span class="ch-tag tag-${esc(c.platform)}">${esc(c.platform)}</span></td>
-                        <td>${getCategoryTag(cat)}</td>
-                        <td style="font-weight:600">${esc(c.group_name)}</td>
-                        <td class="best">${c.ratio}x <span style="font-size:10px;color:var(--text-muted)">${rawNote}</span></td>
-                        <td>${keyHtml}</td>
-                        <td>${statusHtml}</td>
-                        <td>${opHtml}</td>
-                    </tr>`;
-                });
-                h += '</tbody></table></div>';
-            }
-            el.innerHTML = h;
-
-            // Wire buttons
-            el.querySelector('#btnProvAll')?.addEventListener('click', async () => {
-                if (!confirm(`一键配置全部 ${candidates.length} 个分组？已映射的会跳过。`)) return;
-                await batchProvision(candidates);
-            });
-            el.querySelector('#btnProvNew')?.addEventListener('click', async () => {
-                const fresh = candidates.filter(c => !c.mapped);
-                if (!fresh.length) { toast('所有分组已配置'); return; }
-                if (!confirm(`配置 ${fresh.length} 个未映射的分组？`)) return;
-                await batchProvision(fresh);
-            });
+            // 保留仍存在的勾选
+            const valid = new Set(candidates.map(scanRowKey));
+            scanSelected = new Set([...scanSelected].filter(k => valid.has(k)));
+            renderScanResults();
+            loadMappings();
         } catch(e) {
             el.innerHTML = `<div class="empty" style="color:var(--danger)"><div class="empty-icon">⚠</div><h3>扫描失败</h3><p>${esc(e.message)}</p></div>`;
         }
@@ -1424,9 +1645,8 @@ function getCategoryTag(cat) {
     async function batchProvision(cands) {
         let ok = 0, skip = 0, fail = 0, nokey = 0;
         for (const c of cands) {
-            if (!c.has_upstream_key && !(window.__groupKeys || {})[`${c.id}/${c.group_name}`]) {
-                nokey++; continue;
-            }
+            const hasKey = c._hasAnyKey || c.has_upstream_key || !!(window.__groupKeys || {})[`${c.id}/${c.group_name}`];
+            if (!hasKey) { nokey++; continue; }
             try {
                 const r = await api('POST', '/scanner/provision', {
                     account_id: c.id, group_name: c.group_name, ratio: c.ratio
@@ -1439,7 +1659,32 @@ function getCategoryTag(cat) {
         if (nokey) msg += `，${nokey} 缺密钥`;
         if (fail) msg += `，${fail} 失败`;
         toast(msg, fail === 0);
-        doScan();
+        // 不强制整页重扫上游（更快）：只刷新扫描状态
+        try {
+            const { data } = await api('POST', '/scanner/scan');
+            window.__scanCandidates = (data.candidates || []).map(enrichScanCandidate);
+            scanThreshold = data.threshold || scanThreshold;
+            renderScanResults();
+        } catch (_) { doScan(); }
+        loadMappings();
+    }
+
+    async function batchSyncRatio(cands) {
+        let ok = 0, skip = 0, fail = 0;
+        for (const c of cands) {
+            if (!c.mapping_id) continue;
+            try {
+                const r = await api('POST', `/scanner/sync-ratio?mapping_id=${encodeURIComponent(c.mapping_id)}`);
+                if (r.data?.status === 'unchanged') skip++;
+                else ok++;
+            } catch (e) { fail++; toast(`${c.group_name}: ${e.message}`, false); }
+        }
+        toast(`倍率同步：${ok} 更新，${skip} 无变化，${fail} 失败`, fail === 0);
+        try {
+            const { data } = await api('POST', '/scanner/scan');
+            window.__scanCandidates = (data.candidates || []).map(enrichScanCandidate);
+            renderScanResults();
+        } catch (_) { doScan(); }
         loadMappings();
     }
 
