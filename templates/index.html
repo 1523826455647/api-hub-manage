@@ -263,6 +263,8 @@
                     <p>点击「开始扫描」查看低价分组，或「一键全自动同步」直接推送到 Hub</p>
                 </div>
             </div>
+            <!-- 上游密钥一览：渠道级 + 分组级 -->
+            <div style="margin-top:24px" id="keysSection"></div>
             <!-- 已配置映射列表 -->
             <div style="margin-top:24px" id="mappingsSection"></div>
         </section>
@@ -984,6 +986,10 @@ function getCategoryTag(cat) {
             const aid = btn.dataset.aid; const gname = btn.dataset.gname;
             if (aid && gname) return showSetGroupKey(aid, gname);
         }
+        if (act === 'delete-group-key') {
+            const aid = btn.dataset.aid; const gname = btn.dataset.gname;
+            if (aid && gname) return deleteGroupKeyRow(aid, gname);
+        }
         if (act === 'delete-mapping' && mid) {
             if (!confirm('删除映射不会删除 Hub 上已有的账号/分组，确定？')) return;
             try { await api('DELETE', `/scanner/mappings/${encodeURIComponent(mid)}`); toast('映射已删除'); loadMappings(); doScan(); }
@@ -1285,7 +1291,8 @@ function getCategoryTag(cat) {
         } catch(e) {}
         $('#scannerThreshold').textContent = `≤ ${thr}x`;
         loadMappings();
-        loadGroupKeys();
+        await loadGroupKeys();
+        await renderKeysOverview();
     }
 
     // 扫描结果筛分 + 多选按需同步
@@ -1717,7 +1724,93 @@ function getCategoryTag(cat) {
                 map[`${gk.account_id}/${gk.group_name}`] = gk;
             });
             window.__groupKeys = map;
-        } catch(e) { window.__groupKeys = {}; }
+            window.__groupKeysList = data || [];
+        } catch(e) {
+            window.__groupKeys = {};
+            window.__groupKeysList = [];
+        }
+    }
+
+    async function renderKeysOverview() {
+        const el = $('#keysSection');
+        if (!el) return;
+        try {
+            await loadGroupKeys();
+            let accounts = [];
+            try {
+                const r = await api('GET', '/accounts');
+                accounts = r.data || [];
+            } catch (_) {
+                accounts = (lastDashboard && lastDashboard.accounts) || window.__lastAccounts || [];
+            }
+            const nameOf = id => (accounts.find(a => a.id === id) || {}).name || id || '—';
+            const channelWithKey = accounts.filter(a => a.has_upstream_key);
+            const groupKeys = window.__groupKeysList || [];
+
+            let h = `<div class="section-title" style="margin-top:8px">上游密钥一览
+                <span style="color:var(--text-muted);font-weight:600;font-size:12px">
+                    渠道级 ${channelWithKey.length} · 分组级 ${groupKeys.length}
+                </span>
+            </div>
+            <p style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px">
+                探活 / 推送到 Sub2API 只会用这里列出的 sk- Key。Cookie 登录<strong>不会</strong>出现在此列表。
+                分组密钥可在扫描结果的「Key」列设置。
+            </p>`;
+
+            h += `<div class="keys-overview-grid">
+                <div class="keys-panel">
+                    <h3>渠道级上游 Key <span class="keys-count">${channelWithKey.length}</span></h3>`;
+            if (!channelWithKey.length) {
+                h += `<div class="keys-empty">暂无。在「添加渠道」时填写「上游 API Key」，或对已有渠道补配 sk-。</div>`;
+            } else {
+                h += `<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr>
+                    <th>渠道</th><th>平台</th><th>状态</th>
+                </tr></thead><tbody>`;
+                channelWithKey.forEach(a => {
+                    h += `<tr>
+                        <td class="channel-col">${esc(a.name)}</td>
+                        <td><span class="ch-tag tag-${esc(a.platform || '')}">${esc(a.platform || '')}</span></td>
+                        <td><span class="scan-badge ok">✓ 已配置 upstream_key</span></td>
+                    </tr>`;
+                });
+                h += `</tbody></table></div>`;
+            }
+            h += `</div>`;
+
+            h += `<div class="keys-panel">
+                <h3>分组级密钥 <span class="keys-count">${groupKeys.length}</span></h3>`;
+            if (!groupKeys.length) {
+                h += `<div class="keys-empty">暂无分组密钥。扫描后在结果表「Key」列点「设置密钥」，为指定分组绑定 sk-。</div>`;
+            } else {
+                h += `<div class="ratio-table-wrap"><table class="ratio-tbl"><thead><tr>
+                    <th>渠道</th><th>分组</th><th>密钥（脱敏）</th><th>操作</th>
+                </tr></thead><tbody>`;
+                groupKeys.forEach(gk => {
+                    h += `<tr>
+                        <td class="channel-col">${esc(nameOf(gk.account_id))}</td>
+                        <td style="font-weight:600">${esc(gk.group_name)}</td>
+                        <td class="mono" style="font-size:11px">${esc(gk.api_key || '****')}</td>
+                        <td>
+                            <button class="btn btn-ghost" type="button" data-act="set-group-key" data-aid="${esc(gk.account_id)}" data-gname="${esc(gk.group_name)}" style="font-size:10px;padding:3px 8px">更换</button>
+                            <button class="btn btn-danger" type="button" data-act="delete-group-key" data-aid="${esc(gk.account_id)}" data-gname="${esc(gk.group_name)}" style="font-size:10px;padding:3px 8px">删除</button>
+                        </td>
+                    </tr>`;
+                });
+                h += `</tbody></table></div>`;
+            }
+            h += `</div></div>`;
+
+            // 无任何 key 时的总提示
+            if (!channelWithKey.length && !groupKeys.length) {
+                h += `<div class="alert alert-warn" style="margin-top:12px">
+                    <strong>当前没有任何可用的上游 sk- Key</strong><br>
+                    因此探活、配置到 Hub 都会失败。请先为渠道填写上游 Key，或在扫描结果里为分组设置密钥。
+                </div>`;
+            }
+            el.innerHTML = h;
+        } catch (e) {
+            el.innerHTML = `<div style="font-size:12px;color:var(--danger)">密钥一览加载失败：${esc(e.message)}</div>`;
+        }
     }
 
     async function showSetGroupKey(accountId, groupName) {
@@ -1726,33 +1819,32 @@ function getCategoryTag(cat) {
         const existing = gkMap[gkKey];
         openModal('设置分组密钥',
             `<p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">
-                为「<strong>${esc(groupName)}</strong>」设置上游 API Key<br>
-                <span style="font-size:11px">该密钥将用于 Sub2API 调用此分组的上游接口</span>
+                为分组「<strong>${esc(groupName)}</strong>」设置上游 API Key<br>
+                <span style="font-size:11px">保存后会出现在扫描器底部「上游密钥一览」；探活/推送 Hub 优先用分组密钥</span>
             </p>
             <div class="redeem-row">
-                <input id="gkInput" placeholder="sk-xxxxxxxx" value="${existing ? '****' : ''}" autocomplete="off" spellcheck="false">
+                <input id="gkInput" placeholder="sk-xxxxxxxx" value="" autocomplete="off" spellcheck="false">
                 <button class="btn btn-primary" type="button" id="gkSaveBtn">保存</button>
                 ${existing ? `<button class="btn btn-danger" type="button" id="gkDelBtn">删除</button>` : ''}
             </div>
+            ${existing ? `<div style="font-size:12px;color:var(--success);margin-top:8px">当前已配置：${esc(existing.api_key || '****')}</div>` : '<div style="font-size:12px;color:var(--danger);margin-top:8px">当前未配置分组密钥</div>'}
             <div id="gkResult" style="margin-top:10px"></div>`
         );
         const doSave = async () => {
             const val = $('#gkInput').value.trim();
-            if (!val) return;
+            if (!val || val === '****') return toast('请粘贴完整 sk- 密钥', false);
             try {
                 await api('POST', '/group-keys', {
                     account_id: accountId, group_name: groupName, api_key: val
                 });
                 $('#gkResult').innerHTML = '<span style="color:var(--success);font-size:13px">✓ 已保存</span>';
-                loadGroupKeys();
-                if (window.__scanCandidates) {
-                    // Re-render to update key status
-                    const el = $('#scanContent');
-                    // Quick re-render by updating the key column
-                    await loadGroupKeys();
-                    doScan();
+                await loadGroupKeys();
+                await renderKeysOverview();
+                if (window.__scanCandidates && window.__scanCandidates.length) {
+                    window.__scanCandidates = window.__scanCandidates.map((c, i) => enrichScanCandidate(c, c._idx != null ? c._idx : i));
+                    renderScanResults();
                 }
-                setTimeout(closeModal, 800);
+                setTimeout(closeModal, 600);
             } catch(e) {
                 $('#gkResult').innerHTML = `<span style="color:var(--danger);font-size:13px">${esc(e.message)}</span>`;
             }
@@ -1763,14 +1855,25 @@ function getCategoryTag(cat) {
             $('#gkDelBtn').addEventListener('click', async () => {
                 if (!confirm('确认删除此分组的密钥？删除后将回退到渠道级上游 Key。')) return;
                 try {
-                    await api('DELETE', `/group-keys/${encodeURIComponent(accountId)}/${encodeURIComponent(groupName)}`);
+                    await deleteGroupKeyRow(accountId, groupName, true);
                     $('#gkResult').innerHTML = '<span style="color:var(--success)">✓ 已删除</span>';
-                    loadGroupKeys();
-                    setTimeout(closeModal, 800);
+                    setTimeout(closeModal, 600);
                 } catch(e) {
                     $('#gkResult').innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
                 }
             });
+        }
+    }
+
+    async function deleteGroupKeyRow(accountId, groupName, silent = false) {
+        if (!silent && !confirm(`删除分组「${groupName}」的密钥？`)) return;
+        await api('DELETE', `/group-keys/${encodeURIComponent(accountId)}/${encodeURIComponent(groupName)}`);
+        if (!silent) toast('分组密钥已删除');
+        await loadGroupKeys();
+        await renderKeysOverview();
+        if (window.__scanCandidates && window.__scanCandidates.length) {
+            window.__scanCandidates = window.__scanCandidates.map((c, i) => enrichScanCandidate(c, c._idx != null ? c._idx : i));
+            renderScanResults();
         }
     }
 
