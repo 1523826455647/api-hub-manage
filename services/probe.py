@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.parse import quote
 
 from . import new_async_client
 
@@ -20,9 +21,39 @@ def _classify_error(http_status: int | None, message: str) -> str:
         return "rate_limit"
     if http_status == 404 or "model" in msg and ("not found" in msg or "不存在" in msg or "unknown" in msg):
         return "model"
-    if "timeout" in msg or "timed out" in msg:
-        return "timeout"
+    if "timeout" in msg or "timed out" in msg or "codec can't encode" in msg:
+        return "timeout" if "timeout" in msg or "timed out" in msg else "error"
     return "error"
+
+
+def _header_safe(value: str) -> str | None:
+    """HTTP 头只能是 latin-1/ASCII。中文分组名不能直接放 header。
+
+    - 纯 ASCII：原样返回
+    - 含非 ASCII：返回 URL 编码形式（部分网关可识别）
+    - 编码失败：返回 None（调用方跳过该头）
+    """
+    if not value:
+        return None
+    try:
+        value.encode("latin-1")
+        return value
+    except UnicodeEncodeError:
+        # 百分号编码后一定是 ASCII
+        return quote(value, safe="")
+
+
+def _safe_error_text(err: BaseException | str) -> str:
+    """确保错误信息可安全序列化为 JSON（避免二次编码问题）。"""
+    try:
+        if isinstance(err, BaseException):
+            text = str(err)
+        else:
+            text = str(err)
+    except Exception:
+        text = repr(err)
+    # 替换无法显示的控制字符
+    return text.replace("\x00", "")[:500]
 
 
 async def probe_chat_completion(
@@ -48,16 +79,19 @@ async def probe_chat_completion(
         return _fail("model", "缺少模型名", 0)
 
     url = f"{base}/v1/chat/completions"
-    headers = {
+    headers: dict[str, str] = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
     }
-    # 部分 NewAPI 分支支持分组头（无副作用；站点不识别会忽略）
+    # 部分 NewAPI 分支支持分组头。中文分组名不能直接写 header，否则会触发
+    # 'ascii' codec can't encode characters ...
     g = (group_name or "").strip()
-    if g:
-        headers["x-api-group"] = g
-        headers["New-Api-Group"] = g
+    g_header = _header_safe(g)
+    if g_header:
+        headers["x-api-group"] = g_header
+        headers["New-Api-Group"] = g_header
 
+    # JSON body 本身是 UTF-8，中文 prompt / model 没问题
     body: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt or "ping"}],
@@ -65,6 +99,9 @@ async def probe_chat_completion(
         "temperature": temperature,
         "stream": False,
     }
+    # 部分实现用 body 字段传 group（比 header 更兼容中文）
+    if g:
+        body["group"] = g
 
     t0 = time.perf_counter()
     try:
@@ -97,7 +134,7 @@ async def probe_chat_completion(
                 "model": model,
                 "group_name": g,
                 "reply": "",
-                "error": msg[:500],
+                "error": _safe_error_text(msg),
                 "usage": {},
                 "url": url,
             }
@@ -135,10 +172,17 @@ async def probe_chat_completion(
         }
     except Exception as e:
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        em = str(e)
+        em = _safe_error_text(e)
         status = _classify_error(None, em)
         if "timeout" in em.lower() or "timed out" in em.lower():
             status = "timeout"
+        # 旧错误文案友好化
+        if "codec can't encode" in em.lower() or "ordinal not in range" in em.lower():
+            em = (
+                f"请求头编码失败（分组名可能含中文）: {em}。"
+                f"已修复：请重启服务后再试；中文分组会改走 body.group / URL 编码头。"
+            )
+            status = "error"
         return {
             "ok": False,
             "status": status,
@@ -147,7 +191,7 @@ async def probe_chat_completion(
             "model": model,
             "group_name": g,
             "reply": "",
-            "error": em[:500],
+            "error": em,
             "usage": {},
             "url": url,
         }
