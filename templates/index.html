@@ -877,6 +877,7 @@ function getCategoryTag(cat) {
         const id = esc(acc.id);
         const rr = acc.recharge_ratio || 1;
         const isApiKey = acc.credential_type === 'user_api_key';
+        const hasUpstream = !!acc.has_upstream_key;
         const hasError = acc.error && !acc.balance_note;
         const hasNote = acc.balance_note;
 
@@ -912,6 +913,8 @@ function getCategoryTag(cat) {
                     <span class="ch-name">${esc(acc.name)}</span>
                     <span class="ch-tag tag-${esc(acc.platform)}">${esc(acc.platform)}</span>
                     ${isApiKey ? `<span class="ch-tag tag-other" title="User API Key：可查模型，余额/分组需 Cookie 登录">API Key</span>` : ''}
+                    ${acc.credential_type === 'cookie' ? `<span class="ch-tag tag-other" title="Cookie 会话">Cookie</span>` : ''}
+                    ${hasUpstream ? `<span class="ch-tag tag-other" title="已配置上游 sk- Key，可用于 Sub2API 联动" style="color:var(--success)">上游Key</span>` : `<span class="ch-tag tag-other" title="未配置上游 API Key，无法推送到 Sub2API" style="opacity:.7">无上游Key</span>`}
                     ${rr !== 1 ? `<span class="ch-tag tag-other" title="充值比例 1:${esc(rr)}，倍率已归一化">1:${esc(rr)}</span>` : ''}
                     <span class="ch-url" title="${esc(acc.base_url)}">${esc(acc.base_url)}</span>
                 </div>
@@ -1109,8 +1112,12 @@ function getCategoryTag(cat) {
         const el = document.getElementById('rulesEditor');
         if (!el) return;
         const rules = classifyRules;
-        const cats = ['Claude', 'GPT', 'Gemini', 'Grok'];
-        const tagClsMap = { 'Claude': 'tag-claude', 'GPT': 'tag-gpt', 'Gemini': 'tag-gemini', 'Grok': 'tag-grok' };
+        // 必须与 MODEL_CATEGORIES / DEFAULT_RULES 一致（含 Claude-官号 / Claude-Kiro）
+        const cats = MODEL_CATEGORIES.filter(c => c !== '其他');
+        const tagClsMap = {
+            'Claude-官号': 'tag-claude', 'Claude-Kiro': 'tag-kiro',
+            'GPT': 'tag-gpt', 'Gemini': 'tag-gemini', 'Grok': 'tag-grok', '其他': 'tag-other',
+        };
 
         let html = '';
         cats.forEach(cat => {

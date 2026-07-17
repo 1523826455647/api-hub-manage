@@ -167,6 +167,8 @@ async def _account_summary(account: dict) -> dict[str, Any]:
         "id": account["id"], "name": account["name"], "platform": account["platform"],
         "base_url": account["base_url"], "recharge_ratio": rr,
         "credential_type": account.get("credential_type", "token"),
+        # 渠道级上游 Key（不含分组级）；分组级在扫描时再判
+        "has_upstream_key": bool(_looks_like_api_key(account.get("upstream_key", "") or "")),
     }
     try:
         balance_r, usage_r, groups_r = await asyncio.wait_for(
@@ -235,8 +237,11 @@ async def list_accounts():
             "platform": acc["platform"],
             "base_url": acc["base_url"],
             "auth_type": acc["auth_type"],
+            "credential_type": acc.get("credential_type", "token"),
             "username": acc.get("username", ""),
             "has_token": bool(acc.get("access_token")),
+            "has_upstream_key": bool(_looks_like_api_key(acc.get("upstream_key", "") or "")),
+            "recharge_ratio": acc.get("recharge_ratio", 1.0) or 1.0,
         })
     return {"success": True, "data": safe_accounts}
 
@@ -333,6 +338,12 @@ async def add_account(account: AccountCreate):
                 new_account["refresh_token"] = adapter.refresh_token
             if hasattr(adapter, "user_id") and adapter.user_id:
                 new_account["user_id"] = adapter.user_id
+            # 登录成功后校正 credential_type，避免后续误把 session 当 token
+            # 登录成功后校正 credential_type（NewAPI 返回 session cookie；Sub2API 返回 JWT）
+            if account.platform == "newapi":
+                new_account["credential_type"] = "cookie"
+            elif account.platform == "sub2api":
+                new_account["credential_type"] = "bearer"
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
@@ -534,6 +545,11 @@ async def refresh_token(account_id: str):
                     acc["refresh_token"] = adapter.refresh_token
                 if hasattr(adapter, "user_id") and adapter.user_id:
                     acc["user_id"] = adapter.user_id
+                # 校正凭据类型
+                if acc.get("platform") == "newapi":
+                    acc["credential_type"] = "cookie"
+                elif acc.get("platform") == "sub2api":
+                    acc["credential_type"] = "bearer"
                 break
         _save_accounts(accounts)
         _cache_invalidate(f"balance:{account_id}")
@@ -608,12 +624,22 @@ async def _build_dashboard(force_snapshot: bool = False) -> dict[str, Any]:
     ))
 
     for s in account_summaries:
-        if s.get("balance"):
-            total_balance += s["balance"]
-        if s.get("today_cost"):
-            today_cost += s["today_cost"] or 0
-        if s.get("total_cost"):
-            total_cost += s["total_cost"] or 0
+        # 注意：余额/消耗为 0 是合法值，不能用 truthy 判断
+        if s.get("balance") is not None:
+            try:
+                total_balance += float(s["balance"] or 0)
+            except (TypeError, ValueError):
+                pass
+        if s.get("today_cost") is not None:
+            try:
+                today_cost += float(s["today_cost"] or 0)
+            except (TypeError, ValueError):
+                pass
+        if s.get("total_cost") is not None:
+            try:
+                total_cost += float(s["total_cost"] or 0)
+            except (TypeError, ValueError):
+                pass
         if s.get("error") and "User API Key" not in str(s.get("error", "")):
             error_count += 1
 
