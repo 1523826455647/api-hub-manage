@@ -27,3 +27,9 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# 本地运行/调试残留
+server.log
+*.log
+data/dash1.json
+data/*.tmp.json

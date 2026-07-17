@@ -8,6 +8,7 @@ API 文档: https://docs.capsolver.com/guide/captcha/cloudflare_turnstile/
 import asyncio
 import httpx
 from typing import Any
+from . import new_async_client
 
 CAPSOLVER_API = "https://api.capsolver.com"
 
@@ -37,7 +38,7 @@ async def solve_turnstile(
     Raises:
         CapSolverError: 解决失败
     """
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with new_async_client(30.0) as client:
         # Step 1: 创建任务
         create_resp = await client.post(
             f"{CAPSOLVER_API}/createTask",
@@ -102,7 +103,7 @@ async def solve_turnstile(
 
 async def get_balance(api_key: str) -> float:
     """查询 CapSolver 账户余额"""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with new_async_client(15.0) as client:
         resp = await client.post(
             f"{CAPSOLVER_API}/getBalance",
             json={"clientKey": api_key},

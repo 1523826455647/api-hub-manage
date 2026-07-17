@@ -15,7 +15,7 @@ Sub2API 服务适配器
 """
 import httpx
 from typing import Any
-from . import BaseAdapter
+from . import BaseAdapter, new_async_client
 
 
 class Sub2APIAdapter(BaseAdapter):
@@ -28,7 +28,7 @@ class Sub2APIAdapter(BaseAdapter):
 
     async def login(self, username: str, password: str, turnstile_token: str = "") -> str:
         """使用邮箱/密码登录，返回 access_token"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             body: dict[str, Any] = {"email": username, "password": password}
             if turnstile_token:
                 body["turnstile_token"] = turnstile_token
@@ -74,7 +74,7 @@ class Sub2APIAdapter(BaseAdapter):
         """使用 refresh_token 刷新 access_token"""
         if not self.refresh_token:
             raise ValueError("无 refresh_token，无法刷新")
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v1/auth/refresh",
                 json={"refresh_token": self.refresh_token},
@@ -91,7 +91,7 @@ class Sub2APIAdapter(BaseAdapter):
 
     async def get_balance(self) -> dict[str, Any]:
         """获取用户余额 - 使用 /api/v1/auth/me"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             me = await self._request_json(client, f"{self.base_url}/api/v1/auth/me")
             balance = me.get("balance", 0)
             return {
@@ -106,7 +106,7 @@ class Sub2APIAdapter(BaseAdapter):
 
     async def get_groups(self) -> list[dict[str, Any]]:
         """获取分组信息 - /api/v1/groups/available + /api/v1/groups/rates"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             # 获取可用分组
             groups_data = await self._request_json(
                 client, f"{self.base_url}/api/v1/groups/available"
@@ -143,7 +143,7 @@ class Sub2APIAdapter(BaseAdapter):
 
     async def get_models(self) -> list[dict[str, Any]]:
         """获取可用模型列表"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             resp = await client.get(
                 f"{self.base_url}/api/models",
                 headers=self._headers(),
@@ -164,7 +164,7 @@ class Sub2APIAdapter(BaseAdapter):
 
     async def get_usage(self) -> dict[str, Any]:
         """获取消耗统计 - /api/v1/usage/dashboard/stats"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             stats = await self._request_json(
                 client, f"{self.base_url}/api/v1/usage/dashboard/stats"
             )
@@ -175,7 +175,7 @@ class Sub2APIAdapter(BaseAdapter):
 
     async def get_announcements(self) -> list[dict[str, Any]]:
         """获取公告 - /api/v1/announcements"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             try:
                 items = await self._request_json(
                     client, f"{self.base_url}/api/v1/announcements"
@@ -196,7 +196,7 @@ class Sub2APIAdapter(BaseAdapter):
 
     async def redeem_code(self, code: str) -> dict[str, Any]:
         """兑换码兑换 - /api/v1/redeem"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v1/redeem",
                 json={"code": code},

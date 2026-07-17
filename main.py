@@ -41,4 +41,6 @@ async def index(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8899, reload=True)
+    # reload=False：避免 Windows 上双进程 + 热重载导致的启动慢/请求卡住
+    # 开发时如需热重载可改为 reload=True
+    uvicorn.run("main:app", host="0.0.0.0", port=8899, reload=False)

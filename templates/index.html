@@ -332,14 +332,22 @@
         }, 2800);
     }
 
-    async function api(method, path, body) {
+    async function api(method, path, body, timeoutMs = 90000) {
         const opts = { method, headers: { 'Content-Type': 'application/json' } };
         if (body !== undefined) opts.body = JSON.stringify(body);
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        opts.signal = ctrl.signal;
         let r;
         try {
             r = await fetch('/api' + path, opts);
         } catch (e) {
+            if (e.name === 'AbortError') {
+                throw new Error(`请求超时（>${Math.round(timeoutMs / 1000)}秒），部分中转站可能无法访问，请稍后重试`);
+            }
             throw new Error('网络请求失败，请确认服务已启动');
+        } finally {
+            clearTimeout(timer);
         }
         let d;
         try {
@@ -457,24 +465,112 @@
         `;
     }
 
+    let _dashLoading = false;   // 防止重复 force 请求
+    let _bgRefreshTimer = null;
+
     async function loadDashboard(force = false) {
         const el = $('#dashContent');
-        el.innerHTML = skeletonHTML();
+        // 已有数据时 force 刷新：保留旧画面，只显示顶部刷新条，避免「一直骨架屏」
+        if (force && lastDashboard && lastDashboard.accounts && lastDashboard.accounts.length) {
+            showRefreshingBanner(true);
+        } else if (!lastDashboard || !(lastDashboard.accounts && lastDashboard.accounts.length)) {
+            el.innerHTML = skeletonHTML();
+        }
+
+        // 普通刷新：不强制，先秒出缓存
+        if (!force) {
+            try {
+                const { data } = await api('GET', '/dashboard', undefined, 15000);
+                lastDashboard = data;
+                window.__lastAccounts = data.accounts || [];
+                renderDashboard(data);
+                updateFooterClock(data);
+                // 无缓存时自动后台强制刷新一次（不阻塞 UI）
+                if (data.empty || !(data.accounts && data.accounts.length)) {
+                    scheduleBackgroundRefresh();
+                }
+                return;
+            } catch (e) {
+                if (!lastDashboard) {
+                    el.innerHTML = `<div class="empty" style="color:var(--danger)">
+                        <div class="empty-icon">⚠</div>
+                        <h3>加载失败</h3>
+                        <p>${esc(e.message)}</p>
+                        <button class="btn btn-primary" type="button" onclick="window.__app.loadDashboard(true)">重试</button>
+                    </div>`;
+                } else {
+                    toast(e.message, false);
+                }
+                return;
+            }
+        }
+
+        // 强制刷新
+        if (_dashLoading) {
+            toast('正在刷新中，请稍候…');
+            return;
+        }
+        _dashLoading = true;
         try {
-            const { data } = await api('GET', `/dashboard${force ? '?force=true' : ''}`);
+            const { data } = await api('GET', '/dashboard?force=true', undefined, 45000);
             lastDashboard = data;
             window.__lastAccounts = data.accounts || [];
             renderDashboard(data);
-            const clock = $('#footerClock');
-            if (clock) clock.textContent = '更新于 ' + new Date().toLocaleTimeString();
+            updateFooterClock(data);
+            if (data.refreshing) {
+                // 后端已有刷新在跑，稍后重试
+                scheduleBackgroundRefresh(2000);
+            }
         } catch (e) {
-            el.innerHTML = `<div class="empty" style="color:var(--danger)">
-                <div class="empty-icon">⚠</div>
-                <h3>加载失败</h3>
-                <p>${esc(e.message)}</p>
-                <button class="btn btn-primary" type="button" onclick="window.__app.loadDashboard(true)">重试</button>
-            </div>`;
+            if (lastDashboard && lastDashboard.accounts && lastDashboard.accounts.length) {
+                toast('刷新失败：' + e.message, false);
+                showRefreshingBanner(false);
+            } else {
+                el.innerHTML = `<div class="empty" style="color:var(--danger)">
+                    <div class="empty-icon">⚠</div>
+                    <h3>加载失败</h3>
+                    <p>${esc(e.message)}</p>
+                    <button class="btn btn-primary" type="button" onclick="window.__app.loadDashboard(true)">重试</button>
+                </div>`;
+            }
+        } finally {
+            _dashLoading = false;
+            showRefreshingBanner(false);
         }
+    }
+
+    function updateFooterClock(data) {
+        const clock = $('#footerClock');
+        if (!clock) return;
+        if (data && data.cached_at) {
+            clock.textContent = '更新于 ' + new Date(data.cached_at * 1000).toLocaleTimeString();
+        } else {
+            clock.textContent = '更新于 ' + new Date().toLocaleTimeString();
+        }
+    }
+
+    function showRefreshingBanner(on) {
+        let ban = document.getElementById('refreshingBanner');
+        if (on) {
+            if (!ban) {
+                ban = document.createElement('div');
+                ban.id = 'refreshingBanner';
+                ban.className = 'cache-banner';
+                ban.innerHTML = '<span><span class="spin"></span> 正在从各中转站拉取最新数据…</span>';
+                const el = $('#dashContent');
+                if (el && el.firstChild) el.insertBefore(ban, el.firstChild);
+                else if (el) el.appendChild(ban);
+            }
+        } else if (ban) {
+            ban.remove();
+        }
+    }
+
+    function scheduleBackgroundRefresh(delayMs = 300) {
+        if (_bgRefreshTimer) clearTimeout(_bgRefreshTimer);
+        _bgRefreshTimer = setTimeout(() => {
+            loadDashboard(true);
+        }, delayMs);
     }
 
     function renderDashboard(data) {
@@ -482,11 +578,16 @@
         const accounts = data.accounts || [];
         let h = '';
 
-        if (data.from_cache && data.cached_at) {
+        if (data.empty && !(data.accounts && data.accounts.length)) {
+            h += `<div class="cache-banner">
+                <span><span class="spin"></span> 首次加载：正在后台拉取各中转站数据，完成后自动更新…</span>
+                <button class="btn btn-ghost" type="button" data-action="force-refresh" style="padding:4px 10px">立即刷新</button>
+            </div>`;
+        } else if (data.from_cache && data.cached_at) {
             const dt = new Date(data.cached_at * 1000);
             const timeStr = dt.toLocaleString();
             h += `<div class="cache-banner">
-                <span>📦 缓存数据（上次刷新：${esc(timeStr)}）· 点击刷新或等待定时刷新获取最新</span>
+                <span>📦 缓存数据（上次刷新：${esc(timeStr)}）· 点「强制」获取最新</span>
                 <button class="btn btn-ghost" type="button" data-action="force-refresh" style="padding:4px 10px">强制刷新</button>
             </div>`;
         }
@@ -600,13 +701,6 @@
                 return rules;
             }
         } catch(e) {}
-        return DEFAULT_RULES;
-    }
-
-        try {
-            const saved = localStorage.getItem('classify_rules');
-            if (saved) return JSON.parse(saved);
-        } catch (e) {}
         return structuredClone(DEFAULT_RULES);
     }
 
@@ -1295,7 +1389,7 @@ function getCategoryTag(cat) {
         const el = $('#scanContent');
         el.innerHTML = '<div class="loading-block"><span class="spin"></span> 全自动同步中，这可能需要一些时间…</div>';
         try {
-            const r = await api('POST', '/scanner/auto-sync');
+            const r = await api('POST', '/scanner/auto-sync', undefined, 300000);
             const s = r.data.summary;
             let msg = `同步完成：${s.new} 新增，${s.updated} 更新，${s.skipped} 跳过`;
             if (s.errors) msg += `，${s.errors} 失败`;
@@ -1561,7 +1655,7 @@ function getCategoryTag(cat) {
 
     function bind() {
         $$('.nav-btn').forEach(b => b.addEventListener('click', () => switchPage(b.dataset.page)));
-        $('#btnRefresh')?.addEventListener('click', () => loadDashboard(true));
+        $('#btnRefresh')?.addEventListener('click', () => loadDashboard(false));
         $('#btnForce')?.addEventListener('click', () => loadDashboard(true));
         $('#themeToggle')?.addEventListener('click', toggleTheme);
         $('#arSwitch')?.addEventListener('change', toggleAutoRefresh);

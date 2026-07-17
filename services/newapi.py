@@ -13,7 +13,7 @@ NewAPI 服务适配器
 """
 import httpx
 from typing import Any
-from . import BaseAdapter
+from . import BaseAdapter, new_async_client
 
 
 def _extract_user_id_from_session(cookie_value: str) -> str:
@@ -79,6 +79,8 @@ class NewAPIAdapter(BaseAdapter):
                  credential_type: str = "token"):
         super().__init__(base_url, access_token, credential_type)
         self.user_id: str = ""
+        self._quota_per_unit: float | None = None
+        self._user_id_checked: bool = False
         # 向后兼容：旧数据没有 credential_type 或为默认 token，根据 token 格式自动判断
         if credential_type in (None, "", "token"):
             if access_token:
@@ -95,19 +97,22 @@ class NewAPIAdapter(BaseAdapter):
                 self.credential_type = "token"
 
     async def _get_quota_per_unit(self) -> float:
-        """从 /api/status 获取 quota_per_unit（每美元对应的 quota 数）"""
-        async with httpx.AsyncClient(timeout=10) as client:
+        """从 /api/status 获取 quota_per_unit（每美元对应的 quota 数），实例内缓存"""
+        if self._quota_per_unit is not None:
+            return self._quota_per_unit
+        async with new_async_client(8.0) as client:
             try:
                 resp = await client.get(f"{self.base_url}/api/status")
                 data = resp.json()
                 qpu = data.get("data", data).get("quota_per_unit", 500000)
-                return qpu if qpu > 0 else 500000
+                self._quota_per_unit = qpu if qpu and qpu > 0 else 500000
             except Exception:
-                return 500000
+                self._quota_per_unit = 500000
+            return self._quota_per_unit
 
     async def check_turnstile(self) -> dict[str, Any]:
         """检查站点是否开启了 Turnstile 人机验证"""
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with new_async_client(15.0) as client:
             try:
                 resp = await client.get(f"{self.base_url}/api/status")
                 data = resp.json()
@@ -125,7 +130,7 @@ class NewAPIAdapter(BaseAdapter):
         对于开启了 Cloudflare Turnstile 的站点，需要传入 turnstile_token。
         token 可通过打码平台（CapSolver/2Captcha）获取，或从浏览器手动提取。
         """
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             params = {}
             if turnstile_token:
                 params["turnstile"] = turnstile_token
@@ -176,9 +181,10 @@ class NewAPIAdapter(BaseAdapter):
 
     async def _ensure_user_id(self):
         """Token 模式下首次请求时，尝试获取 user_id（某些站点可选，失败不阻塞）"""
-        if self.user_id:
+        if self.user_id or self._user_id_checked:
             return
-        async with httpx.AsyncClient(timeout=10) as client:
+        self._user_id_checked = True
+        async with new_async_client(8.0) as client:
             try:
                 resp = await client.get(
                     f"{self.base_url}/api/user/self", headers=self._headers()
@@ -199,7 +205,7 @@ class NewAPIAdapter(BaseAdapter):
         await self._ensure_user_id()
         quota_per_unit = await self._get_quota_per_unit()
 
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             resp = await client.get(
                 f"{self.base_url}/api/user/self",
                 headers=self._headers(),
@@ -233,7 +239,7 @@ class NewAPIAdapter(BaseAdapter):
         if self.credential_type == "user_api_key":
             raise ValueError("User API Key 无法查询分组倍率，请使用 Cookie 登录方式")
         await self._ensure_user_id()
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             resp = await client.get(
                 f"{self.base_url}/api/user/self/groups",
                 headers=self._headers(),
@@ -296,7 +302,7 @@ class NewAPIAdapter(BaseAdapter):
         """获取可用模型列表"""
         # User API Key 走 OpenAI-compatible /v1/models
         if self.credential_type == "user_api_key":
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with new_async_client(10.0) as client:
                 resp = await client.get(
                     f"{self.base_url}/v1/models",
                     headers=self._headers(),
@@ -314,7 +320,7 @@ class NewAPIAdapter(BaseAdapter):
                 return models
 
         await self._ensure_user_id()
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             resp = await client.get(
                 f"{self.base_url}/api/models",
                 headers=self._headers(),
@@ -341,7 +347,7 @@ class NewAPIAdapter(BaseAdapter):
         import time as _time
         quota_per_unit = await self._get_quota_per_unit()
 
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             # 获取今日消耗
             now = int(_time.time())
             # 今天零点
@@ -398,7 +404,7 @@ class NewAPIAdapter(BaseAdapter):
         await self._ensure_user_id()
         quota_per_unit = await self._get_quota_per_unit()
 
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with new_async_client(10.0) as client:
             resp = await client.post(
                 f"{self.base_url}/api/user/topup",
                 json={"key": code},

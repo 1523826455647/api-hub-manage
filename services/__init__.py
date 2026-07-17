@@ -1,6 +1,46 @@
-"""服务适配器基类"""
+"""服务适配器基类 + 共享 SSL 的 HTTP 客户端工厂"""
+import ssl
 from abc import ABC, abstractmethod
 from typing import Any
+
+import httpx
+
+# ── 共享 SSL context ───────────────────────────────────────────────
+# 关键性能修复：httpx.AsyncClient() 默认每次构造都会重建 SSL/CA context，
+# 在部分 Windows 环境实测 ~1.8s（同步阻塞，会卡死 asyncio 事件循环）。
+# 仪表盘一次刷新会创建约 30 个 client → 串行阻塞数十秒 → 前端一直转圈。
+# 进程内只建一次 SSL context，之后所有 client 复用它：
+# 单个 client 创建从 ~1.8s 降到 <1ms，同时仍做完整证书校验。
+try:
+    import certifi
+    _CA_FILE = certifi.where()
+except Exception:
+    _CA_FILE = None
+
+try:
+    SSL_CONTEXT: ssl.SSLContext | None = (
+        ssl.create_default_context(cafile=_CA_FILE) if _CA_FILE
+        else ssl.create_default_context()
+    )
+except Exception:
+    SSL_CONTEXT = None
+
+
+def new_async_client(timeout: float = 8.0, connect: float = 3.0,
+                     **kwargs: Any) -> httpx.AsyncClient:
+    """构造复用共享 SSL context 的 httpx 异步客户端。
+
+    读/写/池超时 timeout 秒，连接超时 connect 秒（不可达站点快速失败）。
+    返回真正的 AsyncClient，可直接 `async with new_async_client(...) as c`。
+    """
+    verify = kwargs.pop("verify", SSL_CONTEXT if SSL_CONTEXT is not None else True)
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, connect=connect),
+        verify=verify,
+        follow_redirects=True,
+        headers={"User-Agent": "API-Hub-Manager/1.0"},
+        **kwargs,
+    )
 
 
 class BaseAdapter(ABC):
