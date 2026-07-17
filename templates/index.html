@@ -274,15 +274,30 @@
             <div class="page-toolbar">
                 <div>
                     <h1>连通性探活</h1>
-                    <div class="sub">自定义渠道 / 分组 / 模型，轻量 chat 请求检测上游是否可用（类似 Sub2API 探活）</div>
+                    <div class="sub">显示延迟 · 定时自动探活 · 渠道/分组/模型自定义</div>
                 </div>
                 <div class="toolbar-actions">
+                    <div class="auto-refresh-ctrl" title="定时自动探活（仅已启用目标）">
+                        <label class="ar-toggle" aria-label="自动探活开关">
+                            <input type="checkbox" id="probeAutoSwitch">
+                            <span class="ar-slider"></span>
+                        </label>
+                        <select id="probeAutoInterval" aria-label="自动探活间隔">
+                            <option value="60">1 min</option>
+                            <option value="180">3 min</option>
+                            <option value="300" selected>5 min</option>
+                            <option value="600">10 min</option>
+                            <option value="1800">30 min</option>
+                        </select>
+                        <span id="probeAutoCountdown" class="ar-countdown" style="display:none" aria-live="polite">--:--</span>
+                    </div>
                     <button class="btn btn-ghost" type="button" id="btnProbeRefresh">刷新列表</button>
                     <button class="btn btn-primary" type="button" id="btnProbeAddOpen">＋ 添加探活目标</button>
                     <button class="btn btn-primary" type="button" id="btnProbeRunAll" style="background:var(--success)">⚡ 全部探活</button>
                 </div>
             </div>
 
+            <div id="probeAutoBanner" class="probe-auto-banner" style="display:none"></div>
             <div id="probeSummary" class="probe-summary" style="display:none"></div>
             <div id="probeList" class="probe-list">
                 <div class="empty">
@@ -2024,6 +2039,10 @@ function getCategoryTag(cat) {
 
     // ========== probe (连通性探活) ==========
     let probeProfiles = [];
+    let probeAutoTimer = null;
+    let probeAutoSecondsLeft = 0;
+    let probeAutoRunning = false;
+    let lastProbeBatchAt = 0;
 
     const PROBE_STATUS_META = {
         ok:         { label: '正常', cls: 'ok', icon: '✓' },
@@ -2038,6 +2057,21 @@ function getCategoryTag(cat) {
         return PROBE_STATUS_META[st] || PROBE_STATUS_META.error;
     }
 
+    function formatLatency(ms) {
+        if (ms == null || ms === '' || Number.isNaN(Number(ms))) return '—';
+        const n = Number(ms);
+        if (n < 1000) return `${Math.round(n)} ms`;
+        return `${(n / 1000).toFixed(2)} s`;
+    }
+
+    function latencyLevel(ms) {
+        if (ms == null || Number.isNaN(Number(ms))) return 'unknown';
+        const n = Number(ms);
+        if (n < 800) return 'fast';
+        if (n < 2000) return 'mid';
+        return 'slow';
+    }
+
     async function loadProbePage() {
         const el = $('#probeList');
         if (el) el.innerHTML = '<div class="loading-block"><span class="spin"></span> 加载探活列表…</div>';
@@ -2049,6 +2083,8 @@ function getCategoryTag(cat) {
                 window.__lastAccounts = data?.accounts || [];
             }
         } catch (_) { /* ignore */ }
+        restoreProbeAuto();
+        updateProbeAutoBanner();
         await loadProbeProfiles();
     }
 
@@ -2168,7 +2204,9 @@ function getCategoryTag(cat) {
     function renderProbeResultCard(r, extra = {}) {
         const meta = probeStatusMeta(r?.status || (r?.ok ? 'ok' : 'error'));
         const name = extra.name || r?.profile_name || r?.account_name || '探活';
-        const latency = r?.latency_ms != null ? `${r.latency_ms} ms` : '—';
+        const ms = r?.latency_ms;
+        const latency = formatLatency(ms);
+        const lvl = latencyLevel(ms);
         const model = r?.model || extra.model || '—';
         const group = r?.group_name || extra.group_name || '—';
         const reply = r?.reply ? esc(r.reply) : '';
@@ -2180,7 +2218,10 @@ function getCategoryTag(cat) {
         return `<div class="probe-card ${meta.cls}">
             <div class="probe-card-top">
                 <div class="probe-status-badge ${meta.cls}"><span class="ico">${meta.icon}</span> ${meta.label}</div>
-                <div class="probe-latency ${r?.ok ? 'ok' : ''}">${esc(latency)}</div>
+                <div class="probe-latency-block ${r?.ok ? 'ok' : ''} ${lvl}">
+                    <div class="probe-latency-label">延迟</div>
+                    <div class="probe-latency">${esc(latency)}</div>
+                </div>
             </div>
             <div class="probe-title">${esc(name)}</div>
             <div class="probe-meta">
@@ -2217,20 +2258,27 @@ function getCategoryTag(cat) {
         }
         // summary from last results
         const withRes = list.filter(p => p.last_result);
-        if (withRes.length && sum) {
-            const ok = withRes.filter(p => p.last_result?.ok).length;
+        const okList = withRes.filter(p => p.last_result?.ok);
+        const ok = okList.length;
+        const latencies = okList.map(p => Number(p.last_result.latency_ms)).filter(n => !Number.isNaN(n));
+        const avgLat = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null;
+        const minLat = latencies.length ? Math.min(...latencies) : null;
+        const maxLat = latencies.length ? Math.max(...latencies) : null;
+        if (sum) {
             sum.style.display = '';
             sum.innerHTML = `
                 <div class="probe-sum-item"><div class="n">${list.length}</div><div class="l">配置</div></div>
                 <div class="probe-sum-item ok"><div class="n">${ok}</div><div class="l">最近成功</div></div>
-                <div class="probe-sum-item fail"><div class="n">${withRes.length - ok}</div><div class="l">最近失败</div></div>
-                <div class="probe-sum-item"><div class="n">${list.filter(p => p.enabled !== false).length}</div><div class="l">已启用</div></div>`;
+                <div class="probe-sum-item fail"><div class="n">${Math.max(0, withRes.length - ok)}</div><div class="l">最近失败</div></div>
+                <div class="probe-sum-item latency"><div class="n">${avgLat != null ? formatLatency(avgLat) : '—'}</div><div class="l">平均延迟${minLat != null ? `（${formatLatency(minLat)} ~ ${formatLatency(maxLat)}）` : ''}</div></div>`;
         }
 
         el.innerHTML = list.map(p => {
             const r = p.last_result;
             const meta = r ? probeStatusMeta(r.status || (r.ok ? 'ok' : 'error')) : null;
-            const latency = r?.latency_ms != null ? `${r.latency_ms} ms` : '未测';
+            const ms = r?.latency_ms;
+            const latency = r ? formatLatency(ms) : '未测';
+            const lvl = r ? latencyLevel(ms) : 'unknown';
             const keyHint = p.has_key === false
                 ? `<span class="probe-key-warn">缺上游Key</span>`
                 : `<span class="probe-key-ok">Key就绪</span>`;
@@ -2241,7 +2289,9 @@ function getCategoryTag(cat) {
                             ? `<span class="probe-status-badge ${meta.cls}"><span class="ico">${meta.icon}</span>${meta.label}</span>`
                             : `<span class="probe-status-badge idle">未测</span>`}
                         <strong class="probe-row-name">${esc(p.name || p.id)}</strong>
-                        ${p.enabled === false ? '<span class="ch-tag tag-other">已禁用</span>' : ''}
+                        ${p.enabled === false
+                            ? '<span class="ch-tag tag-other">已禁用</span>'
+                            : `<span class="ch-tag tag-other" style="color:var(--success)">${$('#probeAutoSwitch')?.checked ? '参与自动' : '已启用'}</span>`}
                         ${keyHint}
                     </div>
                     <div class="probe-row-meta">
@@ -2255,16 +2305,133 @@ function getCategoryTag(cat) {
                     ${r?.reply ? `<div class="probe-reply" style="margin-top:6px">↩ ${esc(r.reply)}</div>` : ''}
                 </div>
                 <div class="probe-row-side">
-                    <div class="probe-latency ${r?.ok ? 'ok' : ''}">${esc(latency)}</div>
+                    <div class="probe-latency-block ${r?.ok ? 'ok' : ''} ${lvl}">
+                        <div class="probe-latency-label">延迟</div>
+                        <div class="probe-latency">${esc(latency)}</div>
+                        ${ms != null && r ? `<div class="probe-latency-raw">${esc(String(Math.round(Number(ms))))} ms</div>` : ''}
+                    </div>
                     <div class="probe-row-actions">
                         <button class="btn btn-primary" type="button" data-act="probe-run" data-pid="${esc(p.id)}" style="font-size:12px">探活</button>
                         <button class="btn btn-ghost" type="button" data-act="probe-toggle" data-pid="${esc(p.id)}" style="font-size:11px">${p.enabled === false ? '启用' : '禁用'}</button>
                         <button class="btn btn-danger" type="button" data-act="probe-del" data-pid="${esc(p.id)}" style="font-size:11px">删除</button>
                     </div>
-                    <div class="probe-row-time">${esc(p.last_run || '')}</div>
+                    <div class="probe-row-time">${esc(p.last_run || '尚未探活')}</div>
                 </div>
             </article>`;
         }).join('');
+    }
+
+    // ---------- 自动探活 ----------
+    function updateProbeAutoBanner() {
+        const ban = $('#probeAutoBanner');
+        if (!ban) return;
+        const on = !!$('#probeAutoSwitch')?.checked;
+        if (!on) {
+            ban.style.display = 'none';
+            return;
+        }
+        const sec = parseInt($('#probeAutoInterval')?.value, 10) || 300;
+        const mins = Math.round(sec / 60);
+        const last = lastProbeBatchAt
+            ? new Date(lastProbeBatchAt).toLocaleTimeString()
+            : '—';
+        ban.style.display = '';
+        ban.innerHTML = `
+            <span class="probe-auto-dot"></span>
+            <span>自动探活已开启 · 每 <strong>${mins}</strong> 分钟检测已启用目标 · 下次
+            <strong id="probeAutoCountdownInline">${$('#probeAutoCountdown')?.textContent || '--:--'}</strong>
+            · 上次批量：${esc(last)}</span>
+            ${probeAutoRunning ? '<span class="probe-auto-running"><span class="spin"></span> 探活进行中…</span>' : ''}`;
+    }
+
+    function updateProbeCountdownDisplay() {
+        const el = $('#probeAutoCountdown');
+        const m = Math.floor(probeAutoSecondsLeft / 60);
+        const s = probeAutoSecondsLeft % 60;
+        const text = `${m}:${String(s).padStart(2, '0')}`;
+        if (el) el.textContent = text;
+        const inline = $('#probeAutoCountdownInline');
+        if (inline) inline.textContent = text;
+    }
+
+    function stopProbeAuto() {
+        if (probeAutoTimer) {
+            clearInterval(probeAutoTimer);
+            probeAutoTimer = null;
+        }
+        probeAutoSecondsLeft = 0;
+        const cd = $('#probeAutoCountdown');
+        if (cd) cd.style.display = 'none';
+        updateProbeAutoBanner();
+    }
+
+    function startProbeAuto() {
+        stopProbeAuto();
+        const seconds = parseInt($('#probeAutoInterval')?.value, 10) || 300;
+        probeAutoSecondsLeft = seconds;
+        const cd = $('#probeAutoCountdown');
+        if (cd) cd.style.display = '';
+        updateProbeCountdownDisplay();
+        updateProbeAutoBanner();
+        probeAutoTimer = setInterval(async () => {
+            if (!$('#probeAutoSwitch')?.checked) {
+                stopProbeAuto();
+                return;
+            }
+            probeAutoSecondsLeft--;
+            if (probeAutoSecondsLeft <= 0) {
+                const interval = parseInt($('#probeAutoInterval')?.value, 10) || 300;
+                probeAutoSecondsLeft = interval;
+                // 避免重叠
+                if (!probeAutoRunning) {
+                    await runAllProbes({ silent: true, auto: true });
+                }
+            }
+            updateProbeCountdownDisplay();
+            updateProbeAutoBanner();
+        }, 1000);
+    }
+
+    function toggleProbeAuto() {
+        const on = !!$('#probeAutoSwitch')?.checked;
+        try {
+            localStorage.setItem('probe_auto_enabled', on ? '1' : '0');
+            localStorage.setItem('probe_auto_interval', $('#probeAutoInterval')?.value || '300');
+        } catch (_) {}
+        if (on) {
+            startProbeAuto();
+            toast(`自动探活已开启（每 ${Math.round((parseInt($('#probeAutoInterval')?.value, 10) || 300) / 60)} 分钟）`);
+        } else {
+            stopProbeAuto();
+            toast('自动探活已关闭');
+        }
+        // 刷新「参与自动」标签
+        if (probeProfiles.length) renderProbeProfiles(probeProfiles);
+    }
+
+    function updateProbeAutoInterval() {
+        try {
+            localStorage.setItem('probe_auto_interval', $('#probeAutoInterval')?.value || '300');
+        } catch (_) {}
+        if ($('#probeAutoSwitch')?.checked) {
+            startProbeAuto();
+            toast(`间隔已更新为 ${Math.round((parseInt($('#probeAutoInterval')?.value, 10) || 300) / 60)} 分钟`);
+        }
+        updateProbeAutoBanner();
+    }
+
+    function restoreProbeAuto() {
+        try {
+            const interval = localStorage.getItem('probe_auto_interval');
+            if (interval && $('#probeAutoInterval')) $('#probeAutoInterval').value = interval;
+            if (localStorage.getItem('probe_auto_enabled') === '1') {
+                if ($('#probeAutoSwitch')) $('#probeAutoSwitch').checked = true;
+                startProbeAuto();
+            } else {
+                stopProbeAuto();
+            }
+        } catch (_) {}
+        updateProbeAutoBanner();
     }
 
     function readProbeForm() {
@@ -2354,25 +2521,53 @@ function getCategoryTag(cat) {
         finally { if (btn) setBusy(btn, false, null, '探活'); }
     }
 
-    async function runAllProbes() {
-        if (!probeProfiles.length) return toast('请先添加探活配置', false);
+    async function runAllProbes(opts = {}) {
+        const silent = !!opts.silent;
+        const auto = !!opts.auto;
+        if (!probeProfiles.length) {
+            if (!silent) toast('请先添加探活配置', false);
+            return;
+        }
+        const enabledCount = probeProfiles.filter(p => p.enabled !== false).length;
+        if (!enabledCount) {
+            if (!silent) toast('没有已启用的探活目标', false);
+            return;
+        }
+        if (probeAutoRunning) {
+            if (!silent) toast('已有探活任务进行中', false);
+            return;
+        }
+        probeAutoRunning = true;
+        updateProbeAutoBanner();
         const btn = $('#btnProbeRunAll');
-        setBusy(btn, true, '探活中…');
+        if (!silent) setBusy(btn, true, '探活中…');
         try {
             const { data } = await api('POST', '/probe/run-all?only_enabled=true', undefined, 300000);
             const s = data.summary || {};
-            toast(`完成：${s.ok || 0} 成功 / ${s.fail || 0} 失败（共 ${s.total || 0}）`, (s.fail || 0) === 0);
-            // show result grid at top of list briefly via re-render
+            lastProbeBatchAt = Date.now();
+            // 计算成功项平均延迟
+            const okLats = (data.results || []).filter(r => r.ok && r.latency_ms != null).map(r => Number(r.latency_ms));
+            const avg = okLats.length ? Math.round(okLats.reduce((a, b) => a + b, 0) / okLats.length) : null;
+            let msg = `${auto ? '自动探活' : '探活'}完成：${s.ok || 0} 成功 / ${s.fail || 0} 失败`;
+            if (avg != null) msg += ` · 平均延迟 ${formatLatency(avg)}`;
+            if (!silent || (s.fail || 0) > 0) toast(msg, (s.fail || 0) === 0);
             await loadProbeProfiles();
-            if (data.results && data.results.length) {
+            if (!silent && data.results && data.results.length) {
                 const host = document.createElement('div');
                 host.className = 'probe-result-grid';
                 host.innerHTML = data.results.map(r => renderProbeResultCard(r)).join('');
                 const list = $('#probeList');
                 if (list) list.prepend(host);
             }
-        } catch (e) { toast(e.message, false); }
-        finally { setBusy(btn, false, null, '⚡ 全部探活'); }
+            updateProbeAutoBanner();
+        } catch (e) {
+            if (!silent) toast(e.message, false);
+            else toast(`自动探活失败：${e.message}`, false);
+        } finally {
+            probeAutoRunning = false;
+            if (!silent) setBusy(btn, false, null, '⚡ 全部探活');
+            updateProbeAutoBanner();
+        }
     }
 
     async function toggleProbeProfile(pid) {
@@ -2450,9 +2645,17 @@ function getCategoryTag(cat) {
         $('#btnScan')?.addEventListener('click', doScan);
         $('#btnAutoSync')?.addEventListener('click', doAutoSync);
         $('#btnProbeRefresh')?.addEventListener('click', loadProbePage);
-        $('#btnProbeRunAll')?.addEventListener('click', runAllProbes);
+        $('#btnProbeRunAll')?.addEventListener('click', () => runAllProbes());
         $('#btnProbeAddOpen')?.addEventListener('click', openProbeAddModal);
+        $('#probeAutoSwitch')?.addEventListener('change', toggleProbeAuto);
+        $('#probeAutoInterval')?.addEventListener('change', updateProbeAutoInterval);
         $('#btnBackDash')?.addEventListener('click', () => switchPage('dashboard'));
+        // 恢复自动探活（即使当前不在探活页，开关状态会在进入页面时再同步 UI）
+        try {
+            if (localStorage.getItem('probe_auto_enabled') === '1') {
+                // 延迟到 DOM 就绪后由 loadProbePage/restoreProbeAuto 处理
+            }
+        } catch (_) {}
         $('#modalClose')?.addEventListener('click', closeModal);
         $('#modal')?.addEventListener('click', e => { if (e.target === $('#modal')) closeModal(); });
         document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
@@ -2476,6 +2679,8 @@ function getCategoryTag(cat) {
 
         applyTheme(currentTheme());
         restoreAutoRefresh();
+        // 自动探活在任意页面后台倒计时（浏览器需保持打开）
+        restoreProbeAuto();
         loadDashboard();
     }
 
