@@ -1610,6 +1610,74 @@ def _save_probe_profiles(profiles: list[dict]):
     )
 
 
+# 探活历史格子：3 行 × 10 列 = 最近 30 次
+PROBE_HISTORY_LIMIT = 30
+
+
+def _probe_cell_color(ok: bool, latency_ms: Any) -> str:
+    """方块颜色：绿 <1000ms；黄 1000-15000；深黄 >15000；红=失败。"""
+    if not ok:
+        return "red"
+    try:
+        ms = float(latency_ms)
+    except (TypeError, ValueError):
+        return "red"
+    if ms < 1000:
+        return "green"
+    if ms <= 15000:
+        return "yellow"
+    return "deep-yellow"
+
+
+def _probe_history_stats(history: list[dict]) -> dict[str, Any]:
+    """计算可用性等统计。可用性 = 成功次数 / 总次数。"""
+    total = len(history or [])
+    if not total:
+        return {
+            "total": 0,
+            "ok_count": 0,
+            "fail_count": 0,
+            "availability": None,
+            "avg_latency_ms": None,
+        }
+    ok_count = sum(1 for h in history if h.get("ok"))
+    lats = []
+    for h in history:
+        if h.get("ok") and h.get("latency_ms") is not None:
+            try:
+                lats.append(float(h["latency_ms"]))
+            except (TypeError, ValueError):
+                pass
+    return {
+        "total": total,
+        "ok_count": ok_count,
+        "fail_count": total - ok_count,
+        "availability": round(ok_count / total * 100, 1),
+        "avg_latency_ms": round(sum(lats) / len(lats)) if lats else None,
+    }
+
+
+def _append_probe_history(profile: dict, result: dict) -> None:
+    """把一次探活结果写入 profile.history（最多 30 条，最新在末尾）。"""
+    hist = profile.get("history")
+    if not isinstance(hist, list):
+        hist = []
+    ok = bool(result.get("ok"))
+    cell = {
+        "ok": ok,
+        "latency_ms": result.get("latency_ms"),
+        "status": result.get("status") or ("ok" if ok else "error"),
+        "tested_at": result.get("tested_at") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "color": _probe_cell_color(ok, result.get("latency_ms")),
+        "error": (result.get("error") or "")[:120],
+    }
+    hist.append(cell)
+    if len(hist) > PROBE_HISTORY_LIMIT:
+        hist = hist[-PROBE_HISTORY_LIMIT:]
+    profile["history"] = hist
+    profile["stats"] = _probe_history_stats(hist)
+
+
 async def _run_probe_for_account(
     account: dict,
     *,
@@ -1688,11 +1756,22 @@ async def list_probe_profiles():
     """列出用户配置的探活目标（渠道+分组+模型）"""
     profiles = _load_probe_profiles()
     accounts = {a["id"]: a for a in _load_accounts()}
+    dirty = False
     for p in profiles:
         acc = accounts.get(p.get("account_id") or "")
         p["account_name"] = (acc or {}).get("name", "")
         p["base_url"] = (acc or {}).get("base_url", "")
         p["has_key"] = bool(acc and _resolve_upstream_key(acc, p.get("group_name") or ""))
+        hist = p.get("history") if isinstance(p.get("history"), list) else []
+        # 兼容旧数据：用 last_result 初始化一格历史
+        if not hist and p.get("last_result"):
+            _append_probe_history(p, p["last_result"])
+            hist = p.get("history") or []
+            dirty = True
+        p["history"] = hist[-PROBE_HISTORY_LIMIT:]
+        p["stats"] = _probe_history_stats(p["history"])
+    if dirty:
+        _save_probe_profiles(profiles)
     return {"success": True, "data": profiles}
 
 
@@ -1718,6 +1797,8 @@ async def create_probe_profile(req: ProbeProfileCreate):
         "enabled": bool(req.enabled),
         "created_at": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
         "last_result": None,
+        "history": [],
+        "stats": _probe_history_stats([]),
     }
     profiles = _load_probe_profiles()
     profiles.append(profile)
@@ -1803,6 +1884,9 @@ async def run_probe_profile(profile_id: str):
     result["profile_name"] = profile.get("name")
     profile["last_result"] = result
     profile["last_run"] = result.get("tested_at")
+    _append_probe_history(profile, result)
+    result["history"] = profile.get("history") or []
+    result["stats"] = profile.get("stats") or _probe_history_stats([])
     _save_probe_profiles(profiles)
     return {"success": True, "data": result}
 
@@ -1849,12 +1933,15 @@ async def run_all_probes(only_enabled: bool = Query(True)):
 
     results = list(await asyncio.gather(*(_one(p) for p in targets)))
 
-    # 回写 last_result
+    # 回写 last_result + 历史色块
     by_id = {r.get("profile_id"): r for r in results if r.get("profile_id")}
     for p in profiles:
         if p.get("id") in by_id:
             p["last_result"] = by_id[p["id"]]
             p["last_run"] = by_id[p["id"]].get("tested_at")
+            _append_probe_history(p, by_id[p["id"]])
+            by_id[p["id"]]["history"] = p.get("history") or []
+            by_id[p["id"]]["stats"] = p.get("stats") or {}
     _save_probe_profiles(profiles)
 
     ok = sum(1 for r in results if r.get("ok"))

@@ -2241,6 +2241,73 @@ function getCategoryTag(cat) {
         </div>`;
     }
 
+    function probeHistoryCellColor(h) {
+        if (!h) return 'empty';
+        if (h.color) return h.color;
+        if (!h.ok) return 'red';
+        const ms = Number(h.latency_ms);
+        if (Number.isNaN(ms)) return 'red';
+        if (ms < 1000) return 'green';
+        if (ms <= 15000) return 'yellow';
+        return 'deep-yellow';
+    }
+
+    /** 3 行 × 10 列历史色块（最多 30 次，最旧在左上，最新在右下） */
+    function renderProbeHistoryGrid(history, stats) {
+        const hist = Array.isArray(history) ? history.slice(-30) : [];
+        const cells = [];
+        // 先空位，再填历史（右对齐：最新在最右侧）
+        const pad = Math.max(0, 30 - hist.length);
+        for (let i = 0; i < pad; i++) cells.push(null);
+        hist.forEach(h => cells.push(h));
+
+        let grid = '<div class="probe-history-grid" title="历史探活（3×10，最多 30 次）">';
+        for (let row = 0; row < 3; row++) {
+            grid += '<div class="probe-history-row">';
+            for (let col = 0; col < 10; col++) {
+                const idx = row * 10 + col;
+                const h = cells[idx];
+                const color = probeHistoryCellColor(h);
+                let tip = '暂无数据';
+                if (h) {
+                    const msText = h.ok && h.latency_ms != null
+                        ? `${Math.round(Number(h.latency_ms))} ms`
+                        : '连接失败';
+                    tip = `${h.tested_at || ''} · ${msText}${h.ok ? '' : (h.error ? ' · ' + h.error : '')}`;
+                }
+                grid += `<span class="probe-cell ${color}" data-tip="${esc(tip)}" title="${esc(tip)}"></span>`;
+            }
+            grid += '</div>';
+        }
+        grid += '</div>';
+
+        const avail = stats && stats.availability != null ? stats.availability : null;
+        const total = stats?.total || hist.length;
+        const okCount = stats?.ok_count ?? hist.filter(h => h && h.ok).length;
+        const availCls = avail == null ? '' : (avail >= 95 ? 'high' : avail >= 80 ? 'mid' : 'low');
+        const availHtml = `
+            <div class="probe-avail ${availCls}">
+                <div class="probe-avail-num">${avail != null ? esc(avail) + '%' : '—'}</div>
+                <div class="probe-avail-label">可用性</div>
+                <div class="probe-avail-sub">${total ? `${okCount}/${total} 成功` : '暂无样本'}</div>
+            </div>`;
+
+        const legend = `<div class="probe-history-legend">
+            <span><i class="probe-cell green"></i>&lt;1000ms</span>
+            <span><i class="probe-cell yellow"></i>1000–15000ms</span>
+            <span><i class="probe-cell deep-yellow"></i>&gt;15000ms</span>
+            <span><i class="probe-cell red"></i>失败</span>
+        </div>`;
+
+        return `<div class="probe-history-wrap">
+            ${availHtml}
+            <div class="probe-history-main">
+                ${grid}
+                ${legend}
+            </div>
+        </div>`;
+    }
+
     function renderProbeProfiles(list) {
         const el = $('#probeList');
         const sum = $('#probeSummary');
@@ -2256,7 +2323,7 @@ function getCategoryTag(cat) {
             $('#btnProbeAddOpenEmpty')?.addEventListener('click', openProbeAddModal);
             return;
         }
-        // summary from last results
+        // summary from last results + 历史可用性
         const withRes = list.filter(p => p.last_result);
         const okList = withRes.filter(p => p.last_result?.ok);
         const ok = okList.length;
@@ -2264,13 +2331,22 @@ function getCategoryTag(cat) {
         const avgLat = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null;
         const minLat = latencies.length ? Math.min(...latencies) : null;
         const maxLat = latencies.length ? Math.max(...latencies) : null;
+        // 全局可用性：所有 profile 历史合计
+        let gOk = 0, gTotal = 0;
+        list.forEach(p => {
+            const st = p.stats || {};
+            gOk += st.ok_count || 0;
+            gTotal += st.total || 0;
+        });
+        const gAvail = gTotal ? (gOk / gTotal * 100).toFixed(1) : null;
         if (sum) {
             sum.style.display = '';
             sum.innerHTML = `
                 <div class="probe-sum-item"><div class="n">${list.length}</div><div class="l">配置</div></div>
                 <div class="probe-sum-item ok"><div class="n">${ok}</div><div class="l">最近成功</div></div>
                 <div class="probe-sum-item fail"><div class="n">${Math.max(0, withRes.length - ok)}</div><div class="l">最近失败</div></div>
-                <div class="probe-sum-item latency"><div class="n">${avgLat != null ? formatLatency(avgLat) : '—'}</div><div class="l">平均延迟${minLat != null ? `（${formatLatency(minLat)} ~ ${formatLatency(maxLat)}）` : ''}</div></div>`;
+                <div class="probe-sum-item latency"><div class="n">${avgLat != null ? formatLatency(avgLat) : '—'}</div><div class="l">平均延迟${minLat != null ? `（${formatLatency(minLat)} ~ ${formatLatency(maxLat)}）` : ''}</div></div>
+                <div class="probe-sum-item avail"><div class="n">${gAvail != null ? gAvail + '%' : '—'}</div><div class="l">整体可用性（历史）</div></div>`;
         }
 
         el.innerHTML = list.map(p => {
@@ -2282,6 +2358,8 @@ function getCategoryTag(cat) {
             const keyHint = p.has_key === false
                 ? `<span class="probe-key-warn">缺上游Key</span>`
                 : `<span class="probe-key-ok">Key就绪</span>`;
+            const stats = p.stats || {};
+            const avail = stats.availability;
             return `<article class="probe-row ${meta ? meta.cls : ''}" data-pid="${esc(p.id)}">
                 <div class="probe-row-main">
                     <div class="probe-row-head">
@@ -2293,6 +2371,7 @@ function getCategoryTag(cat) {
                             ? '<span class="ch-tag tag-other">已禁用</span>'
                             : `<span class="ch-tag tag-other" style="color:var(--success)">${$('#probeAutoSwitch')?.checked ? '参与自动' : '已启用'}</span>`}
                         ${keyHint}
+                        ${avail != null ? `<span class="probe-avail-pill ${avail >= 95 ? 'high' : avail >= 80 ? 'mid' : 'low'}">可用性 ${esc(avail)}%</span>` : ''}
                     </div>
                     <div class="probe-row-meta">
                         <span>${esc(p.account_name || p.account_id || '')}</span>
@@ -2301,12 +2380,13 @@ function getCategoryTag(cat) {
                         <span class="dot">·</span>
                         <span class="mono">${esc(p.model || '')}</span>
                     </div>
+                    ${renderProbeHistoryGrid(p.history || [], stats)}
                     ${r?.error ? `<div class="probe-error" style="margin-top:8px">${esc(r.error)}</div>` : ''}
                     ${r?.reply ? `<div class="probe-reply" style="margin-top:6px">↩ ${esc(r.reply)}</div>` : ''}
                 </div>
                 <div class="probe-row-side">
                     <div class="probe-latency-block ${r?.ok ? 'ok' : ''} ${lvl}">
-                        <div class="probe-latency-label">延迟</div>
+                        <div class="probe-latency-label">最近延迟</div>
                         <div class="probe-latency">${esc(latency)}</div>
                         ${ms != null && r ? `<div class="probe-latency-raw">${esc(String(Math.round(Number(ms))))} ms</div>` : ''}
                     </div>

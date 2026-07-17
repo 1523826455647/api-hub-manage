@@ -1494,9 +1494,13 @@ html[data-theme="dark"] .tag-other {
 /* ========== 连通性探活（Sub2API 风格状态卡） ========== */
 .probe-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
+}
+
+@media (max-width: 1100px) {
+  .probe-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 .probe-sum-item {
@@ -1716,6 +1720,174 @@ html[data-theme="dark"] .tag-other {
   color: var(--primary);
   font-weight: 650;
   font-size: 12px;
+}
+
+/* 探活历史 3×10 色块 + 可用性 */
+.probe-history-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.probe-history-main {
+  flex: 1;
+  min-width: 220px;
+}
+
+.probe-history-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.probe-history-row {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 4px;
+}
+
+.probe-cell {
+  display: inline-block;
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 14px;
+  min-height: 14px;
+  max-width: 22px;
+  max-height: 22px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  cursor: default;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.probe-cell:hover {
+  transform: scale(1.25);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  z-index: 2;
+  position: relative;
+}
+
+.probe-cell.green {
+  background: #22c55e;
+  border-color: #16a34a;
+}
+
+.probe-cell.yellow {
+  background: #eab308;
+  border-color: #ca8a04;
+}
+
+.probe-cell.deep-yellow {
+  background: #d97706;
+  border-color: #b45309;
+}
+
+.probe-cell.red {
+  background: #ef4444;
+  border-color: #dc2626;
+}
+
+.probe-cell.empty {
+  background: var(--surface-2);
+  border-color: var(--border);
+  opacity: 0.55;
+}
+
+.probe-history-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.probe-history-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.probe-history-legend .probe-cell {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  min-height: 12px;
+  max-width: 12px;
+  max-height: 12px;
+  cursor: default;
+}
+
+.probe-history-legend .probe-cell:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.probe-avail {
+  min-width: 88px;
+  text-align: center;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.probe-avail-num {
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.probe-avail.high .probe-avail-num { color: var(--success); }
+.probe-avail.mid .probe-avail-num { color: var(--warning); }
+.probe-avail.low .probe-avail-num { color: var(--danger); }
+
+.probe-avail-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.probe-avail-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.probe-avail-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
+.probe-avail-pill.high {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.probe-avail-pill.mid {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.probe-avail-pill.low {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.probe-sum-item.avail .n {
+  font-size: 18px;
+  font-family: var(--mono);
 }
 
 .probe-key-ok {
