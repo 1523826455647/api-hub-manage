@@ -1551,3 +1551,290 @@ async def update_user_id(account_id: str, req: UserIdUpdate):
     _save_accounts(accounts)
     _cache_invalidate()
     return {"success": True, "message": "User ID 已更新"}
+
+
+# === 连通性探活 ===
+
+PROBE_PROFILES_FILE = DATA_DIR / "probe_profiles.json"
+
+
+class ProbeProfileCreate(BaseModel):
+    name: str = ""
+    account_id: str
+    group_name: str = ""
+    model: str
+    prompt: str = "ping"
+    max_tokens: int = 8
+    timeout: int = 30
+    enabled: bool = True
+
+
+class ProbeProfileUpdate(BaseModel):
+    name: str | None = None
+    account_id: str | None = None
+    group_name: str | None = None
+    model: str | None = None
+    prompt: str | None = None
+    max_tokens: int | None = None
+    timeout: int | None = None
+    enabled: bool | None = None
+
+
+class ProbeRunRequest(BaseModel):
+    """即时探活（可不保存为配置）"""
+    account_id: str
+    group_name: str = ""
+    model: str
+    prompt: str = "ping"
+    max_tokens: int = 8
+    timeout: int = 30
+
+
+def _load_probe_profiles() -> list[dict]:
+    if not PROBE_PROFILES_FILE.exists():
+        return []
+    try:
+        data = json.loads(PROBE_PROFILES_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("profiles") or []
+    except (json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def _save_probe_profiles(profiles: list[dict]):
+    PROBE_PROFILES_FILE.write_text(
+        json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+async def _run_probe_for_account(
+    account: dict,
+    *,
+    group_name: str,
+    model: str,
+    prompt: str = "ping",
+    max_tokens: int = 8,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    from services.probe import probe_chat_completion
+
+    try:
+        api_key = _require_upstream_key(account, group_name or "")
+    except ValueError as e:
+        return {
+            "ok": False,
+            "status": "auth",
+            "latency_ms": 0,
+            "http_status": None,
+            "model": model,
+            "group_name": group_name,
+            "reply": "",
+            "error": str(e),
+            "usage": {},
+            "account_id": account.get("id"),
+            "account_name": account.get("name"),
+            "base_url": account.get("base_url"),
+            "tested_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+
+    result = await probe_chat_completion(
+        base_url=account.get("base_url", ""),
+        api_key=api_key,
+        model=model,
+        group_name=group_name or "",
+        prompt=prompt or "ping",
+        max_tokens=max_tokens or 8,
+        timeout=float(timeout or 30),
+    )
+    result["account_id"] = account.get("id")
+    result["account_name"] = account.get("name")
+    result["base_url"] = account.get("base_url")
+    result["tested_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    return result
+
+
+@router.get("/probe/profiles")
+async def list_probe_profiles():
+    """列出用户配置的探活目标（渠道+分组+模型）"""
+    profiles = _load_probe_profiles()
+    accounts = {a["id"]: a for a in _load_accounts()}
+    for p in profiles:
+        acc = accounts.get(p.get("account_id") or "")
+        p["account_name"] = (acc or {}).get("name", "")
+        p["base_url"] = (acc or {}).get("base_url", "")
+        p["has_key"] = bool(acc and _resolve_upstream_key(acc, p.get("group_name") or ""))
+    return {"success": True, "data": profiles}
+
+
+@router.post("/probe/profiles")
+async def create_probe_profile(req: ProbeProfileCreate):
+    """新增探活配置"""
+    accounts = _load_accounts()
+    account = next((a for a in accounts if a["id"] == req.account_id), None)
+    if not account:
+        raise HTTPException(status_code=404, detail="渠道不存在")
+    if not (req.model or "").strip():
+        raise HTTPException(status_code=400, detail="请填写模型名")
+
+    profile = {
+        "id": str(uuid.uuid4())[:8],
+        "name": (req.name or "").strip() or f"{account['name']}-{req.group_name or 'default'}-{req.model}",
+        "account_id": req.account_id,
+        "group_name": (req.group_name or "").strip(),
+        "model": req.model.strip(),
+        "prompt": (req.prompt or "ping").strip() or "ping",
+        "max_tokens": max(1, min(int(req.max_tokens or 8), 64)),
+        "timeout": max(5, min(int(req.timeout or 30), 120)),
+        "enabled": bool(req.enabled),
+        "created_at": time.strftime("%Y-%m-%d %H:%M", time.localtime()),
+        "last_result": None,
+    }
+    profiles = _load_probe_profiles()
+    profiles.append(profile)
+    _save_probe_profiles(profiles)
+    return {"success": True, "data": profile}
+
+
+@router.put("/probe/profiles/{profile_id}")
+async def update_probe_profile(profile_id: str, req: ProbeProfileUpdate):
+    profiles = _load_probe_profiles()
+    profile = next((p for p in profiles if p.get("id") == profile_id), None)
+    if not profile:
+        raise HTTPException(status_code=404, detail="探活配置不存在")
+    data = req.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        if v is None:
+            continue
+        if k == "max_tokens":
+            profile[k] = max(1, min(int(v), 64))
+        elif k == "timeout":
+            profile[k] = max(5, min(int(v), 120))
+        elif k in ("name", "group_name", "model", "prompt", "account_id"):
+            profile[k] = str(v).strip() if isinstance(v, str) else v
+        elif k == "enabled":
+            profile[k] = bool(v)
+    if profile.get("account_id"):
+        acc = next((a for a in _load_accounts() if a["id"] == profile["account_id"]), None)
+        if not acc:
+            raise HTTPException(status_code=400, detail="渠道不存在")
+    _save_probe_profiles(profiles)
+    return {"success": True, "data": profile}
+
+
+@router.delete("/probe/profiles/{profile_id}")
+async def delete_probe_profile(profile_id: str):
+    profiles = _load_probe_profiles()
+    new_list = [p for p in profiles if p.get("id") != profile_id]
+    if len(new_list) == len(profiles):
+        raise HTTPException(status_code=404, detail="探活配置不存在")
+    _save_probe_profiles(new_list)
+    return {"success": True, "message": "已删除"}
+
+
+@router.post("/probe/run")
+async def run_probe_once(req: ProbeRunRequest):
+    """即时探活（不依赖已保存配置）"""
+    accounts = _load_accounts()
+    account = next((a for a in accounts if a["id"] == req.account_id), None)
+    if not account:
+        raise HTTPException(status_code=404, detail="渠道不存在")
+    result = await _run_probe_for_account(
+        account,
+        group_name=req.group_name or "",
+        model=req.model,
+        prompt=req.prompt or "ping",
+        max_tokens=req.max_tokens or 8,
+        timeout=req.timeout or 30,
+    )
+    return {"success": True, "data": result}
+
+
+@router.post("/probe/profiles/{profile_id}/run")
+async def run_probe_profile(profile_id: str):
+    """运行单条探活配置，并回写 last_result"""
+    profiles = _load_probe_profiles()
+    profile = next((p for p in profiles if p.get("id") == profile_id), None)
+    if not profile:
+        raise HTTPException(status_code=404, detail="探活配置不存在")
+    accounts = _load_accounts()
+    account = next((a for a in accounts if a["id"] == profile.get("account_id")), None)
+    if not account:
+        raise HTTPException(status_code=400, detail="配置关联的渠道不存在，请重新选择")
+
+    result = await _run_probe_for_account(
+        account,
+        group_name=profile.get("group_name") or "",
+        model=profile.get("model") or "",
+        prompt=profile.get("prompt") or "ping",
+        max_tokens=int(profile.get("max_tokens") or 8),
+        timeout=int(profile.get("timeout") or 30),
+    )
+    result["profile_id"] = profile_id
+    result["profile_name"] = profile.get("name")
+    profile["last_result"] = result
+    profile["last_run"] = result.get("tested_at")
+    _save_probe_profiles(profiles)
+    return {"success": True, "data": result}
+
+
+@router.post("/probe/run-all")
+async def run_all_probes(only_enabled: bool = Query(True)):
+    """并发运行全部（或仅启用的）探活配置"""
+    profiles = _load_probe_profiles()
+    if only_enabled:
+        targets = [p for p in profiles if p.get("enabled", True)]
+    else:
+        targets = list(profiles)
+    if not targets:
+        return {"success": True, "data": {"results": [], "summary": {"total": 0, "ok": 0, "fail": 0}}}
+
+    accounts = {a["id"]: a for a in _load_accounts()}
+
+    async def _one(p: dict) -> dict:
+        acc = accounts.get(p.get("account_id") or "")
+        if not acc:
+            return {
+                "ok": False,
+                "status": "error",
+                "latency_ms": 0,
+                "error": "渠道不存在",
+                "profile_id": p.get("id"),
+                "profile_name": p.get("name"),
+                "model": p.get("model"),
+                "group_name": p.get("group_name"),
+                "account_name": "",
+                "tested_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+        r = await _run_probe_for_account(
+            acc,
+            group_name=p.get("group_name") or "",
+            model=p.get("model") or "",
+            prompt=p.get("prompt") or "ping",
+            max_tokens=int(p.get("max_tokens") or 8),
+            timeout=int(p.get("timeout") or 30),
+        )
+        r["profile_id"] = p.get("id")
+        r["profile_name"] = p.get("name")
+        return r
+
+    results = list(await asyncio.gather(*(_one(p) for p in targets)))
+
+    # 回写 last_result
+    by_id = {r.get("profile_id"): r for r in results if r.get("profile_id")}
+    for p in profiles:
+        if p.get("id") in by_id:
+            p["last_result"] = by_id[p["id"]]
+            p["last_run"] = by_id[p["id"]].get("tested_at")
+    _save_probe_profiles(profiles)
+
+    ok = sum(1 for r in results if r.get("ok"))
+    return {
+        "success": True,
+        "data": {
+            "results": results,
+            "summary": {"total": len(results), "ok": ok, "fail": len(results) - ok},
+        },
+    }

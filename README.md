@@ -41,6 +41,12 @@ python main.py
 - NewAPI: 调用 `/api/user/topup`
 - Sub2API: 调用 `/api/v1/redeem`
 
+### 连通性探活
+- 用户自行配置：渠道 + 分组 + 模型（可保存多条）
+- 向 `{base}/v1/chat/completions` 发送轻量请求（类似 Sub2API 探活）
+- 结果展示：状态徽章、耗时 ms、回复摘要、错误分类（鉴权/限流/模型/超时）
+- 支持单条探活、全部探活、启用/禁用配置
+
 ## API 端点对照
 
 ### NewAPI 端点
