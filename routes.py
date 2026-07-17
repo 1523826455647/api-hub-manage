@@ -1621,6 +1621,14 @@ async def _run_probe_for_account(
 ) -> dict[str, Any]:
     from services.probe import probe_chat_completion
 
+    base_meta = {
+        "account_id": account.get("id"),
+        "account_name": account.get("name"),
+        "base_url": account.get("base_url"),
+        "tested_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "group_name": group_name or "",
+        "model": model or "",
+    }
     try:
         api_key = _require_upstream_key(account, group_name or "")
     except ValueError as e:
@@ -1629,30 +1637,49 @@ async def _run_probe_for_account(
             "status": "auth",
             "latency_ms": 0,
             "http_status": None,
-            "model": model,
-            "group_name": group_name,
             "reply": "",
             "error": str(e),
             "usage": {},
-            "account_id": account.get("id"),
-            "account_name": account.get("name"),
-            "base_url": account.get("base_url"),
-            "tested_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            **base_meta,
         }
 
-    result = await probe_chat_completion(
-        base_url=account.get("base_url", ""),
-        api_key=api_key,
-        model=model,
-        group_name=group_name or "",
-        prompt=prompt or "ping",
-        max_tokens=max_tokens or 8,
-        timeout=float(timeout or 30),
-    )
-    result["account_id"] = account.get("id")
-    result["account_name"] = account.get("name")
-    result["base_url"] = account.get("base_url")
-    result["tested_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    try:
+        result = await probe_chat_completion(
+            base_url=account.get("base_url", ""),
+            api_key=api_key,
+            model=model,
+            group_name=group_name or "",
+            prompt=prompt or "ping",
+            max_tokens=max_tokens or 8,
+            timeout=float(timeout or 30),
+        )
+    except UnicodeEncodeError as e:
+        return {
+            "ok": False,
+            "status": "error",
+            "latency_ms": 0,
+            "http_status": None,
+            "reply": "",
+            "error": f"编码错误: {e}。请重启服务（python main.py）后再试。",
+            "usage": {},
+            **base_meta,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "status": "error",
+            "latency_ms": 0,
+            "http_status": None,
+            "reply": "",
+            "error": str(e)[:500],
+            "usage": {},
+            **base_meta,
+        }
+
+    result["account_id"] = base_meta["account_id"]
+    result["account_name"] = base_meta["account_name"]
+    result["base_url"] = base_meta["base_url"]
+    result["tested_at"] = base_meta["tested_at"]
     return result
 
 

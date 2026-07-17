@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from urllib.parse import quote
 
 from . import new_async_client
 
@@ -19,41 +18,37 @@ def _classify_error(http_status: int | None, message: str) -> str:
         return "auth"
     if http_status == 429 or "rate" in msg or "quota" in msg or "limit" in msg or "负载" in msg or "过载" in msg:
         return "rate_limit"
-    if http_status == 404 or "model" in msg and ("not found" in msg or "不存在" in msg or "unknown" in msg):
+    if http_status == 404 or ("model" in msg and ("not found" in msg or "不存在" in msg or "unknown" in msg)):
         return "model"
-    if "timeout" in msg or "timed out" in msg or "codec can't encode" in msg:
-        return "timeout" if "timeout" in msg or "timed out" in msg else "error"
+    if "timeout" in msg or "timed out" in msg:
+        return "timeout"
     return "error"
 
 
-def _header_safe(value: str) -> str | None:
-    """HTTP 头只能是 latin-1/ASCII。中文分组名不能直接放 header。
-
-    - 纯 ASCII：原样返回
-    - 含非 ASCII：返回 URL 编码形式（部分网关可识别）
-    - 编码失败：返回 None（调用方跳过该头）
-    """
-    if not value:
-        return None
+def _is_ascii(s: str) -> bool:
     try:
-        value.encode("latin-1")
-        return value
+        s.encode("ascii")
+        return True
     except UnicodeEncodeError:
-        # 百分号编码后一定是 ASCII
-        return quote(value, safe="")
+        return False
 
 
 def _safe_error_text(err: BaseException | str) -> str:
-    """确保错误信息可安全序列化为 JSON（避免二次编码问题）。"""
     try:
-        if isinstance(err, BaseException):
-            text = str(err)
-        else:
-            text = str(err)
+        text = str(err) if not isinstance(err, str) else err
     except Exception:
         text = repr(err)
-    # 替换无法显示的控制字符
     return text.replace("\x00", "")[:500]
+
+
+def _ascii_headers(headers: dict[str, str]) -> dict[str, str]:
+    """严格过滤：任何非 ASCII 头一律丢弃，杜绝 httpx/httpcore 的 ascii encode 崩溃。"""
+    out: dict[str, str] = {}
+    for k, v in headers.items():
+        ks, vs = str(k), str(v)
+        if _is_ascii(ks) and _is_ascii(vs):
+            out[ks] = vs
+    return out
 
 
 async def probe_chat_completion(
@@ -71,35 +66,36 @@ async def probe_chat_completion(
     base = (base_url or "").rstrip("/")
     model = (model or "").strip()
     api_key = (api_key or "").strip()
+    g = (group_name or "").strip()
+
     if not base:
-        return _fail("error", "缺少 base_url", 0)
+        return _fail("error", "缺少 base_url", 0, g)
     if not api_key:
-        return _fail("auth", "缺少上游 API Key", 0)
+        return _fail("auth", "缺少上游 API Key", 0, g)
     if not model:
-        return _fail("model", "缺少模型名", 0)
+        return _fail("model", "缺少模型名", 0, g)
 
     url = f"{base}/v1/chat/completions"
-    headers: dict[str, str] = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json; charset=utf-8",
-    }
-    # 部分 NewAPI 分支支持分组头。中文分组名不能直接写 header，否则会触发
-    # 'ascii' codec can't encode characters ...
-    g = (group_name or "").strip()
-    g_header = _header_safe(g)
-    if g_header:
-        headers["x-api-group"] = g_header
-        headers["New-Api-Group"] = g_header
 
-    # JSON body 本身是 UTF-8，中文 prompt / model 没问题
+    # Header 只放纯 ASCII。中文分组名绝不进 header（会触发
+    # 'ascii' codec can't encode characters ...）。
+    raw_headers: dict[str, str] = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if g and _is_ascii(g):
+        raw_headers["x-api-group"] = g
+        raw_headers["New-Api-Group"] = g
+    headers = _ascii_headers(raw_headers)
+
+    # JSON body 是 UTF-8，中文 prompt / model / group 都安全
     body: dict[str, Any] = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt or "ping"}],
+        "messages": [{"role": "user", "content": str(prompt or "ping")}],
         "max_tokens": max(1, int(max_tokens or 8)),
-        "temperature": temperature,
+        "temperature": float(temperature or 0),
         "stream": False,
     }
-    # 部分实现用 body 字段传 group（比 header 更兼容中文）
     if g:
         body["group"] = g
 
@@ -109,7 +105,12 @@ async def probe_chat_completion(
             resp = await client.post(url, headers=headers, json=body)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         http_status = resp.status_code
-        text = resp.text or ""
+        text = ""
+        try:
+            text = resp.text or ""
+        except Exception:
+            text = ""
+        data = None
         try:
             data = resp.json()
         except Exception:
@@ -120,15 +121,15 @@ async def probe_chat_completion(
             if isinstance(data, dict):
                 err = data.get("error") or data.get("message") or data.get("msg") or ""
                 if isinstance(err, dict):
-                    msg = err.get("message") or err.get("msg") or str(err)
+                    msg = str(err.get("message") or err.get("msg") or err)
                 else:
                     msg = str(err)
             if not msg:
-                msg = text[:300] or f"HTTP {http_status}"
-            status = _classify_error(http_status, msg)
+                # 响应体可能是 HTML，截断并保证可返回
+                msg = (text[:300] if text else f"HTTP {http_status}")
             return {
                 "ok": False,
-                "status": status,
+                "status": _classify_error(http_status, msg),
                 "latency_ms": latency_ms,
                 "http_status": http_status,
                 "model": model,
@@ -147,11 +148,10 @@ async def probe_chat_completion(
             used_model = data.get("model") or model
             choices = data.get("choices") or []
             if choices and isinstance(choices[0], dict):
-                msg = choices[0].get("message") or {}
-                if isinstance(msg, dict):
-                    reply = str(msg.get("content") or "")
+                msg_obj = choices[0].get("message") or {}
+                if isinstance(msg_obj, dict):
+                    reply = str(msg_obj.get("content") or "")
                 if not reply:
-                    # 兼容部分返回 delta / text
                     reply = str(choices[0].get("text") or choices[0].get("content") or "")
 
         return {
@@ -170,19 +170,37 @@ async def probe_chat_completion(
             },
             "url": url,
         }
+    except UnicodeEncodeError as e:
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        return {
+            "ok": False,
+            "status": "error",
+            "latency_ms": latency_ms,
+            "http_status": None,
+            "model": model,
+            "group_name": g,
+            "reply": "",
+            "error": (
+                "编码错误（请求含非 ASCII 字符被错误放入 HTTP 头）。"
+                f"详情: {_safe_error_text(e)}。"
+                "请重启 python main.py 后再试；中文分组请依赖 body.group / 分组绑定的 sk- Key。"
+            ),
+            "usage": {},
+            "url": url,
+        }
     except Exception as e:
         latency_ms = int((time.perf_counter() - t0) * 1000)
         em = _safe_error_text(e)
         status = _classify_error(None, em)
         if "timeout" in em.lower() or "timed out" in em.lower():
             status = "timeout"
-        # 旧错误文案友好化
         if "codec can't encode" in em.lower() or "ordinal not in range" in em.lower():
-            em = (
-                f"请求头编码失败（分组名可能含中文）: {em}。"
-                f"已修复：请重启服务后再试；中文分组会改走 body.group / URL 编码头。"
-            )
             status = "error"
+            em = (
+                "请求编码失败（多为中文分组名写入了 HTTP 头）。"
+                "已在新版本修复：请彻底关闭旧 python 进程后重启服务再探活。"
+                f" 原始错误: {em}"
+            )
         return {
             "ok": False,
             "status": status,
@@ -197,14 +215,14 @@ async def probe_chat_completion(
         }
 
 
-def _fail(status: str, error: str, latency_ms: int) -> dict[str, Any]:
+def _fail(status: str, error: str, latency_ms: int, group_name: str = "") -> dict[str, Any]:
     return {
         "ok": False,
         "status": status,
         "latency_ms": latency_ms,
         "http_status": None,
         "model": "",
-        "group_name": "",
+        "group_name": group_name or "",
         "reply": "",
         "error": error,
         "usage": {},
