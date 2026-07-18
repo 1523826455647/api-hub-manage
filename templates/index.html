@@ -2289,22 +2289,12 @@ function getCategoryTag(cat) {
             <div class="probe-avail ${availCls}">
                 <div class="probe-avail-num">${avail != null ? esc(avail) + '%' : '—'}</div>
                 <div class="probe-avail-label">可用性</div>
-                <div class="probe-avail-sub">${total ? `${okCount}/${total} 成功` : '暂无样本'}</div>
+                <div class="probe-avail-sub">${total ? `${okCount}/${total}` : '无样本'}</div>
             </div>`;
-
-        const legend = `<div class="probe-history-legend">
-            <span><i class="probe-cell green"></i>&lt;1000ms</span>
-            <span><i class="probe-cell yellow"></i>1000–15000ms</span>
-            <span><i class="probe-cell deep-yellow"></i>&gt;15000ms</span>
-            <span><i class="probe-cell red"></i>失败</span>
-        </div>`;
 
         return `<div class="probe-history-wrap">
             ${availHtml}
-            <div class="probe-history-main">
-                ${grid}
-                ${legend}
-            </div>
+            <div class="probe-history-main">${grid}</div>
         </div>`;
     }
 
@@ -2360,42 +2350,46 @@ function getCategoryTag(cat) {
                 : `<span class="probe-key-ok">Key就绪</span>`;
             const stats = p.stats || {};
             const avail = stats.availability;
-            return `<article class="probe-row ${meta ? meta.cls : ''}" data-pid="${esc(p.id)}">
-                <div class="probe-row-main">
-                    <div class="probe-row-head">
-                        ${meta
-                            ? `<span class="probe-status-badge ${meta.cls}"><span class="ico">${meta.icon}</span>${meta.label}</span>`
-                            : `<span class="probe-status-badge idle">未测</span>`}
-                        <strong class="probe-row-name">${esc(p.name || p.id)}</strong>
-                        ${p.enabled === false
-                            ? '<span class="ch-tag tag-other">已禁用</span>'
-                            : `<span class="ch-tag tag-other" style="color:var(--success)">${$('#probeAutoSwitch')?.checked ? '参与自动' : '已启用'}</span>`}
-                        ${keyHint}
-                        ${avail != null ? `<span class="probe-avail-pill ${avail >= 95 ? 'high' : avail >= 80 ? 'mid' : 'low'}">可用性 ${esc(avail)}%</span>` : ''}
+            return `<article class="probe-tile ${meta ? meta.cls : ''}" data-pid="${esc(p.id)}">
+                <div class="probe-tile-top">
+                    <div class="probe-tile-title-wrap">
+                        <div class="probe-tile-title-row">
+                            ${meta
+                                ? `<span class="probe-status-badge ${meta.cls}"><span class="ico">${meta.icon}</span>${meta.label}</span>`
+                                : `<span class="probe-status-badge idle">未测</span>`}
+                            <strong class="probe-row-name" title="${esc(p.name || p.id)}">${esc(p.name || p.id)}</strong>
+                        </div>
+                        <div class="probe-row-meta">
+                            <span>${esc(p.account_name || p.account_id || '')}</span>
+                            <span class="dot">·</span>
+                            <span>${esc(p.group_name || '默认')}</span>
+                            <span class="dot">·</span>
+                            <span class="mono">${esc(p.model || '')}</span>
+                        </div>
                     </div>
-                    <div class="probe-row-meta">
-                        <span>${esc(p.account_name || p.account_id || '')}</span>
-                        <span class="dot">·</span>
-                        <span>${esc(p.group_name || '默认分组')}</span>
-                        <span class="dot">·</span>
-                        <span class="mono">${esc(p.model || '')}</span>
-                    </div>
-                    ${renderProbeHistoryGrid(p.history || [], stats)}
-                    ${r?.error ? `<div class="probe-error" style="margin-top:8px">${esc(r.error)}</div>` : ''}
-                    ${r?.reply ? `<div class="probe-reply" style="margin-top:6px">↩ ${esc(r.reply)}</div>` : ''}
-                </div>
-                <div class="probe-row-side">
                     <div class="probe-latency-block ${r?.ok ? 'ok' : ''} ${lvl}">
-                        <div class="probe-latency-label">最近延迟</div>
+                        <div class="probe-latency-label">延迟</div>
                         <div class="probe-latency">${esc(latency)}</div>
                         ${ms != null && r ? `<div class="probe-latency-raw">${esc(String(Math.round(Number(ms))))} ms</div>` : ''}
                     </div>
+                </div>
+                <div class="probe-tile-tags">
+                    ${p.enabled === false
+                        ? '<span class="ch-tag tag-other">已禁用</span>'
+                        : `<span class="ch-tag tag-other" style="color:var(--success)">${$('#probeAutoSwitch')?.checked ? '参与自动' : '已启用'}</span>`}
+                    ${keyHint}
+                    ${avail != null ? `<span class="probe-avail-pill ${avail >= 95 ? 'high' : avail >= 80 ? 'mid' : 'low'}">${esc(avail)}%</span>` : ''}
+                </div>
+                ${renderProbeHistoryGrid(p.history || [], stats)}
+                ${r?.error ? `<div class="probe-error probe-tile-msg">${esc(r.error)}</div>` : ''}
+                ${r?.reply ? `<div class="probe-reply probe-tile-msg">↩ ${esc(r.reply)}</div>` : ''}
+                <div class="probe-tile-footer">
+                    <span class="probe-row-time">${esc(p.last_run || '尚未探活')}</span>
                     <div class="probe-row-actions">
-                        <button class="btn btn-primary" type="button" data-act="probe-run" data-pid="${esc(p.id)}" style="font-size:12px">探活</button>
-                        <button class="btn btn-ghost" type="button" data-act="probe-toggle" data-pid="${esc(p.id)}" style="font-size:11px">${p.enabled === false ? '启用' : '禁用'}</button>
-                        <button class="btn btn-danger" type="button" data-act="probe-del" data-pid="${esc(p.id)}" style="font-size:11px">删除</button>
+                        <button class="btn btn-primary" type="button" data-act="probe-run" data-pid="${esc(p.id)}" style="font-size:11px;padding:4px 10px">探活</button>
+                        <button class="btn btn-ghost" type="button" data-act="probe-toggle" data-pid="${esc(p.id)}" style="font-size:11px;padding:4px 8px">${p.enabled === false ? '启用' : '禁用'}</button>
+                        <button class="btn btn-danger" type="button" data-act="probe-del" data-pid="${esc(p.id)}" style="font-size:11px;padding:4px 8px">删除</button>
                     </div>
-                    <div class="probe-row-time">${esc(p.last_run || '尚未探活')}</div>
                 </div>
             </article>`;
         }).join('');
